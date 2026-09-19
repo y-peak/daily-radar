@@ -828,7 +828,13 @@ else:
             _v = r_ver.get_json()
             check("报出 sidecar 里的 versionCode", lambda: eq(_v.get("versionCode"), 3))
             check("报出 versionName", lambda: eq(_v.get("versionName"), "1.1"))
-            check("报出下载地址", lambda: eq(_v.get("url"), "/app"))
+            # ⭐ 给的必须是**具体那个文件**的路径，不能是 `/app` 这个别名。
+            #    `/app` 每次请求都重新挑一次"最新的包"，而 App 是"先问版本、
+            #    再下载"两次请求。中间刚好传了新包的话，App 就会拿着 v1.5 的
+            #    版本号去下 v1.6 的包 —— 表现为"更新完还提示有新版"，
+            #    自相矛盾又极难复现。给确定路径就不存在这个窗口。
+            check("下载地址是具体文件而不是 /app 别名",
+                  lambda: eq(_v.get("url"), "/dl/radar-1.1.apk"))
             check("带出 sha256 供手机核对", lambda: eq(_v.get("sha256"), "deadbeef"))
 
             # ⭐ "谁是最新版"**不能由上传顺序决定**。
@@ -1635,6 +1641,7 @@ try:
     _strs = (_app_dir / "res/values/strings.xml").read_text(encoding="utf-8")
     _build = (_app_dir / "build.sh").read_text(encoding="utf-8")
     _mani = (_app_dir / "AndroidManifest.xml").read_text(encoding="utf-8")
+    _apk_prov = (_app_dir / "java/com/ypeak/radar/ApkProvider.java").read_text(encoding="utf-8")
 
     # --- 1. 自动检查（1.2 起） ---
     check("壳里有 checkUpdate", lambda: has("private void checkUpdate", _act))
@@ -1661,8 +1668,80 @@ try:
     # --- 3. 资源清理：销毁时摘桥，否则已死 Activity 被 JS 侧继续引用 ---
     check("销毁时移除桥", lambda: has('removeJavascriptInterface("RadarNative")', _act))
 
-    # --- 4. 权限取向：下载交给系统浏览器 → 不该申请应用内安装权限 ---
-    check("不申请应用内安装权限", lambda: eq("REQUEST_INSTALL_PACKAGES" in _mani, False))
+    # --- 4. ⭐ 应用内下载 + 安装（1.5）
+    #
+    # 注意这里**翻转了 1.4 的判据**：以前"下载交给系统浏览器"，所以刻意
+    # 不申请 REQUEST_INSTALL_PACKAGES。改成应用内安装之后，这个权限变成必需 ——
+    # 少了它，安装界面弹出后会立刻失败，用户只看到"更新没反应"。
+    # 版本迭代时判据被反转，是很容易漏掉的一类回归，所以留在这里点名。
+    check("⭐ 申请了应用内安装权限",
+          lambda: has("android.permission.REQUEST_INSTALL_PACKAGES", _mani))
+
+    # 从 API 24 起跨应用传 file:// 会抛 FileUriExposedException，必须用 content://
+    check("有自建 ContentProvider（不依赖 AndroidX）",
+          lambda: has("extends ContentProvider", _apk_prov))
+    check("清单里声明了 provider", lambda: has('android:name=".ApkProvider"', _mani))
+    check("provider 的 authorities 与代码一致",
+          lambda: has('android:authorities="com.ypeak.radar.apk"', _mani)
+          and has('AUTHORITY = "com.ypeak.radar.apk"', _apk_prov))
+    check("provider 不对外暴露", lambda: has('android:exported="false"', _mani))
+    # grantUriPermissions=false 的话，安装器读不到那个临时授权的 URI
+    check("provider 允许临时授权", lambda: has("grantUriPermissions=\"true\"", _mani))
+    check("传 URI 时带了临时授权标志",
+          lambda: has("FLAG_GRANT_READ_URI_PERMISSION", _act))
+    check("provider 只认 *.apk 且挡路径穿越",
+          lambda: has("SAFE_NAME", _apk_prov) and has("\\.apk$", _apk_prov))
+    check("provider 是只读的",
+          lambda: has("ApkProvider 是只读的", _apk_prov))
+
+    check("下载在 App 内完成（不再跳浏览器）",
+          lambda: has("private void startDownload(", _act))
+    check("下载有进度反馈", lambda: has("setDownloadProgress", _act))
+    check("下载是互斥的（防重复起线程）", lambda: has("downloading", _act))
+    # read() 在链路中断时可能正常返回 EOF 而不抛异常 → 必须验长度，
+    # 否则会把截断的包丢给安装器，报出"解析包时出现问题"这种莫名错误
+    check("⭐ 下完验长度（防截断包）",
+          lambda: has("out.length() <= 0", _act))
+    check("下载落盘用固定文件名（自清理）",
+          lambda: has('DL_FILE = "radar-update.apk"', _act))
+    # 下载地址以服务器返回的 url 为准，但不能盲信它拼出外站地址
+    check("下载路径回落到站内别名前有校验",
+          lambda: has('path.startsWith("/")', _act) and has("indexOf(\"//\")", _act))
+
+    check("未授权时先引导授权而不是硬装",
+          lambda: has("canRequestPackageInstalls", _act) and has("pendingApk", _act))
+    check("授权回来后自动续装（onResume 里）",
+          lambda: has("pendingApk != null && canInstallPackages()", _act))
+    check("能跳到「安装未知应用」授权页",
+          lambda: has("MANAGE_UNKNOWN_APP_SOURCES", _act))
+    check("拉起安装器失败有兜底（INSTALL_PACKAGE）",
+          lambda: has("ACTION_INSTALL_PACKAGE", _act))
+    check("下载失败有提示", lambda: has('name="update_dl_failed"', _strs))
+    check("需要授权时有提示", lambda: has('name="update_need_perm"', _strs))
+
+    # --- 4b. ⭐ 自动更新开关（1.5）
+    check("壳里有自动更新开关的存值", lambda: has('PREF_AUTO = "auto_update"', _act))
+    # 自动模式要更及时：用户既然把开关打开了，还按 6 小时算会让他以为没生效。
+    # 这里把两个间隔的**字面值**都钉住 —— 只查常量名的话，把两者改成一样也照样过。
+    check("自动模式检查间隔比手动模式短",
+          lambda: has("AUTO_CHECK_INTERVAL_MS = 60L * 60 * 1000", _act)
+          and has("UPDATE_CHECK_INTERVAL_MS = 6L * 60 * 60 * 1000", _act))
+    check("自动模式下不弹窗、直接下", lambda: has("autoThisRun", _act))
+    check("自动模式下静默下载（不弹进度框）",
+          lambda: has("startDownload(code, shown, path, true)", _act))
+    check("桥暴露 getAutoUpdate", lambda: has("boolean getAutoUpdate()", _act))
+    check("桥暴露 setAutoUpdate", lambda: has("void setAutoUpdate(final boolean on)", _act))
+    check("桥暴露 canInstall", lambda: has("boolean canInstall()", _act))
+    check("桥暴露 openInstallSettings", lambda: has("void openInstallSettings()", _act))
+    check("桥暴露 downloadUpdate", lambda: has("void downloadUpdate()", _act))
+
+    # 构建侧：新增类必须被拷进构建目录。
+    # ⚠️ 这里防的是"写死了只拷 MainActivity.java"这类漏编 ——
+    # ContentProvider 是被清单引用的，javac 不会检查它，漏了也能编译通过。
+    check("build.sh 整目录拷 java（不写死文件名）",
+          lambda: has('cp -r "$HERE/java/." ', _build))
+    check("build.sh 点名确认新类在构建目录",
+          lambda: has("ApkProvider", _build))
 
     # --- 5. 版本前进（写侧）—— 否则线上"最新版"会被更旧的包顶掉 ---
     check("build.sh 版本自动递增", lambda: has("LAST_CODE + 1", _build))
@@ -1843,6 +1922,93 @@ except Exception as exc:  # noqa: BLE001
     print("  [!!] 读书模块检查抛异常：")
     print(traceback.format_exc())
     FAILED.append("reader")
+
+# ==================================================== 15. 设置页（/settings/）
+# 这一页和站上其它页有一个根本区别：**它是空壳** —— 页面上没有一个服务端注入的值，
+# 全部由 app.js 在运行时从安卓壳的 JS 桥里读。
+#
+# 于是它有两类"看着没事其实坏了"的失败：
+#   ① 有桥时没解开设置区 → 用户进 App 看到一片空白
+#   ② 没桥时把开关画出来 → 用户点半天没反应，比没有开关更糟
+# 这两条只能靠真跑浏览器验（tools/settings_probe.mjs）。这里做静态结构检查，
+# 保证"该有的都在位"，然后再由探针确认真跑起来是对的。
+print("\n== 15. 设置页（自动更新 / 安装权限）==")
+try:
+    _set_tpl = (ROOT / "radar/templates/settings.html").read_text(encoding="utf-8")
+    _base = (ROOT / "radar/templates/base.html").read_text(encoding="utf-8")
+    _render_src = (ROOT / "radar/core/render.py").read_text(encoding="utf-8")
+    _js_src = (ROOT / "radar/static/app.js").read_text(encoding="utf-8")
+    _set_html = ROOT / "public/settings/index.html"
+
+    check("设置页模板存在", lambda: eq(_set_tpl.count("<section") >= 3, True))
+
+    # --- 该有的控件 ---
+    for _id in ("set-env", "set-native", "set-web-only", "auto-update",
+                "set-cur", "set-latest", "set-check", "set-dl",
+                "set-perm-panel", "set-perm"):
+        check(f"模板含 #{_id}", (lambda i: (lambda: has(f'id="{i}"', _set_tpl)))(_id))
+
+    # ⚠️ 设置区必须**默认隐藏**：浏览器里要靠 app.js 检测到桥才解开。
+    #    默认显示的话，浏览器用户会看到一堆点了没用的开关。
+    check("设置区默认隐藏", lambda: has('id="set-native" hidden', _set_tpl))
+    check("浏览器提示块默认隐藏", lambda: has('id="set-web-only" hidden', _set_tpl))
+
+    # 设置项不该被"点标题折叠"误伤（点了标题把开关收起来，像功能消失）
+    check("设置卡片豁免折叠",
+          lambda: eq(_set_tpl.count("data-no-collapse"), 5))
+    check("折叠逻辑尊重豁免属性",
+          lambda: has('p.hasAttribute("data-no-collapse")', _js_src))
+
+    # 文案必须诚实：系统那一次安装确认绕不过去，不能假装零打扰
+    check("如实说明系统确认绕不过去",
+          lambda: has("无法绕过", _set_tpl))
+
+    # --- 前端接线 ---
+    check("app.js 有 setupSettings", lambda: has("function setupSettings()", _js_src))
+    check("app.js 启动了 setupSettings", lambda: has("setupSettings();", _js_src))
+    check("读自动更新开关", lambda: has("native.getAutoUpdate()", _js_src))
+    check("写自动更新开关", lambda: has("native.setAutoUpdate(", _js_src))
+    check("读安装权限", lambda: has("native.canInstall()", _js_src))
+    check("跳授权页", lambda: has("native.openInstallSettings()", _js_src))
+    check("手动下载安装", lambda: has("native.downloadUpdate()", _js_src))
+    # 未授权时必须**先授权再下**，硬下只会在安装那步失败
+    check("⭐ 未授权时先引导授权而不是硬下",
+          lambda: has("请先允许本应用", _js_src)
+          and _js_src.index("请先允许本应用") < _js_src.index("native.downloadUpdate()"))
+
+    # --- 构建接线：核心页也要套 base.html 外壳 ---
+    check("render.py 会生成设置页",
+          lambda: has('core_pages = {"settings/index.html": "settings.html"}', _render_src))
+    check("核心页也走 base.html 套壳",
+          lambda: has("base_tpl.render(**shell, active=rel.split", _render_src))
+    check("页脚有设置入口", lambda: has('href="/settings/">设置</a>', _base))
+
+    # --- 构建产物 ---
+    check("public/settings/index.html 已生成", lambda: eq(_set_html.is_file(), True))
+    if _set_html.is_file():
+        _sh = _set_html.read_text(encoding="utf-8")
+        check("产物含设置区", lambda: has('id="set-native"', _sh))
+        check("产物套了外壳（含页脚/样式）",
+              lambda: has("/static/style.css", _sh) and has("</footer>", _sh))
+        check("产物含页脚设置入口", lambda: has('href="/settings/">设置</a>', _sh))
+
+    # --- 探针脚本本身存在（真跑浏览器那一步）---
+    for _p in ("tools/reader_probe.mjs", "tools/settings_probe.mjs",
+               "tools/run_ui_probe.sh"):
+        check(f"{_p} 存在", (lambda n: (lambda: eq((ROOT / n).is_file(), True)))(_p))
+    # ⚠️ 这个坑花了一小时：mktemp -d 返回 POSIX 路径，Windows 版 Chrome 不认，
+    #    它会**静默退出**（零输出、不监听端口），探针那侧只报"连不上 CDP"，
+    #    把排查方向引到网络上去。转换那一行不能删。
+    _probe_sh = (ROOT / "tools/run_ui_probe.sh").read_text(encoding="utf-8")
+    check("⭐ 给 Chrome 的 profile 目录转成了 Windows 路径",
+          lambda: has("cygpath -m", _probe_sh))
+    check("Chrome 起不来时会当场报出来",
+          lambda: has("无头 Chrome 没能起来", _probe_sh))
+except Exception as exc:  # noqa: BLE001
+    import traceback
+    print("  [!!] 设置页检查抛异常：")
+    print(traceback.format_exc())
+    FAILED.append("settings")
 
 print("\n" + "=" * 52)
 if FAILED:

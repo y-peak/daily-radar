@@ -25,11 +25,14 @@ final class AppConfig {
     /** 站点的访问口令（构建期注入）。 */
     static final String TOKEN = "__RADAR_TOKEN__";
 
+    /** 站点根。分开写是为了让"某个接口要拼别的路径"时不用重复拼 https:// 与口令。 */
+    static final String BASE_URL = "https://" + HOST;
+
     /**
      * 首次加载用的地址。带上 `?t=<口令>` 让站点种下 Cookie，
      * 之后 WebView 内部跳转全靠那条 Cookie（一年有效）。
      */
-    static final String START_URL = "https://" + HOST + "/?t=" + TOKEN;
+    static final String START_URL = BASE_URL + "/?t=" + TOKEN;
 
     /**
      * 版本查询接口。用于"检测到新版本"。
@@ -37,10 +40,20 @@ final class AppConfig {
      * 为什么也带 `?t=`：`HttpURLConnection` 走的是自己的 Cookie 存储，
      * **不会**共享 WebView 的 CookieJar —— 不带口令就会拿到 401。
      */
-    static final String API_APP = "https://" + HOST + "/api/app?t=" + TOKEN;
+    static final String API_APP = BASE_URL + "/api/app?t=" + TOKEN;
 
-    /** 下载地址（短链）。交给系统浏览器去下 + 装，比自己下更可靠。 */
-    static final String APK_URL = "https://" + HOST + "/app?t=" + TOKEN;
+    /**
+     * 下载地址（兜底用）。
+     *
+     * ⚠️ 正常情况下**不会**用到它：`/api/app` 会返回一个确定的
+     * `/dl/<具体文件名>`，App 就下那一个。用别名的风险是"报的版本"和
+     * "下到的包"可能不是同一个（两次请求之间刚好换了包）。
+     * 这里留着只是为了兼容老服务器（返回的 url 字段缺失时退化到它）。
+     */
+    static final String APK_URL = BASE_URL + "/app?t=" + TOKEN;
+
+    /** 给下载拼鉴权参数用。 */
+    static final String TOKEN_QUERY = "?t=" + TOKEN;
 
     /** 本体的版本。和服务器返回的 versionCode 比大小。 */
     static final int VERSION_CODE = __RADAR_VERSION_CODE__;

@@ -195,6 +195,29 @@ def build_site(cfg: Config, app: dict, modules: list, log=print, index: dict | N
             extra += 1
             written += 1
 
+    # ---- 核心自带页（不属于任何模块）----
+    #
+    # 目前只有设置页。放这里而不是塞进某个模块，是因为它描述的是**客户端行为**
+    # （自动更新、安装权限），跟哪个模块都没关系；塞进模块会让人误以为
+    # 它只对那个模块生效。
+    #
+    # ⚠️ 和模块的 extra_pages 一样，核心页也必须走 base.html 套壳 ——
+    #    直接往 public/ 写裸 HTML 会没有 <head> / CSS / 导航，页面是半残的。
+    core_pages = {"settings/index.html": "settings.html"}
+    for rel, tpl in core_pages.items():
+        tpl_path = cfg.template_dir / tpl
+        if not tpl_path.is_file():
+            continue
+        body = env.get_template(tpl).render(**shell)
+        dest = public / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(
+            base_tpl.render(**shell, active=rel.split("/")[0], body=body,
+                            module=None, dates=[], date=None,
+                            title="设置", is_latest=False),
+            encoding="utf-8")
+        written += 1
+
     # 首页：正文是 index.html 模板，一样要套 base.html 外壳
     # （否则没有 <head>/CSS/导航，页面是裸的）
     home_body = env.get_template("index.html").render(**shell, index=index)

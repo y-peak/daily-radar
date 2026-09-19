@@ -2091,3 +2091,135 @@ pre.json {
   border-radius: var(--r-xs);
 }
 
+
+/* ============================================================================
+   32. 设置页（/settings/）
+   ----------------------------------------------------------------------------
+   这一页的控件都是**运行时**才露出来的：app.js 检测到安卓壳的 JS 桥存在，
+   才把 #set-native 解开。所以这里只负责"长得像个设置页"，
+   不负责"点了会发生什么" —— 那部分在 app.js::setupSettings()。
+   ============================================================================ */
+
+/* 开关：原生 checkbox 藏起来，用 <i> 当轨道、::after 当滑块。
+   保持 input 可聚焦（键盘/无障碍），只是视觉上换成自定义样式。 */
+.set-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-4);
+}
+.set-label { display: flex; flex-direction: column; gap: 3px; flex: 1 1 auto; min-width: 0; }
+.set-name  { font-size: var(--fs-base); font-weight: 600; }
+.set-desc  { font-size: var(--fs-sm); color: var(--text-dim); line-height: 1.5; }
+
+.set-switch { position: relative; flex: none; display: inline-flex; }
+.set-switch input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+  z-index: 1;
+}
+.set-switch i {
+  display: block;
+  width: 46px;
+  height: 28px;
+  border-radius: var(--r-full);
+  background: var(--surface-3);
+  border: 1px solid var(--border-strong);
+  transition: background var(--dur) var(--ease-out), border-color var(--dur) var(--ease-out);
+  position: relative;
+}
+.set-switch i::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: var(--shadow-xs);
+  transition: transform var(--dur) var(--ease-out);
+}
+.set-switch input:checked + i { background: var(--brand); border-color: var(--brand); }
+.set-switch input:checked + i::after { transform: translateX(18px); }
+.set-switch input:focus-visible + i { box-shadow: 0 0 0 3px var(--brand-glow); }
+
+/* 键值行：左标签右值，用虚线分隔 —— 比实线轻，不抢视觉。 */
+.set-kv {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding: var(--sp-2) 0;
+  font-size: var(--fs-sm);
+  border-bottom: 1px dashed var(--border);
+}
+.set-kv:last-of-type { border-bottom: 0; }
+.set-kv > span:first-child { color: var(--text-dim); }
+.set-kv > span:last-child  { font-weight: 600; font-family: var(--font-mono); }
+
+.set-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin-top: var(--sp-4);
+}
+
+/* 按钮：默认中性，primary 走品牌色。刻意不用 <button> 的默认外观 ——
+   各 ROM 的 WebView 对默认按钮样式差异很大。 */
+.set-btn {
+  appearance: none;
+  -webkit-appearance: none;
+  display: inline-block;
+  padding: 9px var(--sp-4);
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text);
+  font-family: inherit;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  line-height: 1.2;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background var(--dur) var(--ease-out), transform var(--dur-fast) var(--ease-out);
+}
+.set-btn:hover  { background: var(--hover); }
+.set-btn:active { transform: scale(.97); }
+.set-btn.primary {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: #fff;
+}
+.set-btn.primary:hover { background: var(--brand-deep); }
+.set-btn[disabled] { opacity: .55; cursor: default; transform: none; }
+
+.set-note {
+  margin: var(--sp-3) 0 0;
+  font-size: var(--fs-sm);
+  color: var(--text-faint);
+  line-height: 1.6;
+}
+/* 结果提示：成功/警告两态。默认中性，由 app.js 加类。 */
+.set-note.is-ok   { color: var(--down); }
+.set-note.is-warn { color: var(--warn); }
+.set-note.is-busy { color: var(--brand); }
+
+/* 版本号旁边的小徽标（"有新版本"） */
+.set-badge {
+  display: inline-block;
+  margin-left: var(--sp-2);
+  padding: 1px 7px;
+  border-radius: var(--r-full);
+  background: var(--brand-dim);
+  color: var(--brand-deep);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 600;
+  vertical-align: 1px;
+}

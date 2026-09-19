@@ -190,7 +190,24 @@ cp -r "$HERE/res/." "$BU/res_src/"
 # manifest 也拷过来：aapt2 是 Windows 程序，把带中文的仓库路径直接交给它
 # 会因为代码页问题"找不到文件"，绕开最省事
 cp "$HERE/AndroidManifest.xml" "$BU/AndroidManifest.xml"
-cp "$HERE/java/com/ypeak/radar/MainActivity.java" "$BU/java/com/ypeak/radar/"
+# ⚠️ 整个 java 目录一起拷，**不要写死文件名**。
+#    以前这里是 `cp .../MainActivity.java`。加第二个类（ApkProvider）时，
+#    这种写法要么编译报"找不到符号"，要么更糟 —— 如果那个类只是被反射/清单引用
+#    （ContentProvider 就是被 AndroidManifest 引用的），javac 根本不检查它，
+#    于是**编译通过、装上才发现类不存在**。整目录拷贝把这类漏编一次性消灭。
+cp -r "$HERE/java/." "$BU/java/"
+rm -f "$BU/java/com/ypeak/radar/AppConfig.java.in"    # 模板不参与编译，别留在构建目录里
+
+# 逐个类点名确认：漏了哪个，这里立刻报出来，而不是等装到手机上。
+# ⚠️ 这里只列**手写的**类。AppConfig 是下一步由模板生成的，
+#    此刻还不存在 —— 把它列进来只会让构建永远失败。
+#    （AppConfig 由后面的"逐字段核对"负责，那份检查更严：它比对的是内容。）
+for cls in MainActivity ApkProvider; do
+    [ -f "$BU/java/com/ypeak/radar/$cls.java" ] \
+        || { echo "✗ 构建目录里缺 $cls.java（新增类时忘了拷？）" >&2; exit 1; }
+done
+
+# ---------------------------------------------------------------- 由模板生成 AppConfig
 # ⚠️ 注入前必须转义 sed 的替换串：
 #    `&` 在 sed 替换串里表示"整个匹配到的文本"，`\` 和分隔符同理。
 #    不转义的话，口令里只要有一个 `&`，生成的 URL 就会**静默变错**

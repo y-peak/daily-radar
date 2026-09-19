@@ -4,13 +4,28 @@
     <string name="offline_hint">暂时连不上服务器\n请检查手机网络后重试</string>
     <string name="retry">重试</string>
     <string name="auth_failed">访问口令失效了\n请用带口令的地址重新打开一次</string>
+
     <!-- 更新提示。两个 %s 分别是"新版本"和"当前版本" -->
     <string name="update_title">发现新版本</string>
-    <string name="update_msg">有新版本 v%1$s 可用（当前 v%2$s）。\n是否现在下载？下载后点安装包即可覆盖升级。</string>
+    <string name="update_msg">有新版本 v%1$s 可用（当前 v%2$s）。\n是否现在下载？下完会直接调起系统安装。</string>
     <string name="update_now">立即更新</string>
     <string name="update_later">以后再说</string>
     <string name="update_skip">跳过这个版本</string>
+
     <!-- 用户主动点「检查更新」后的反馈：自动检查可以静默，主动问必须有回答 -->
     <string name="update_is_latest">已是最新版本 v%1$s</string>
     <string name="update_check_failed">检查更新失败，请检查网络后重试</string>
+
+    <!-- 应用内下载安装。
+         口径变了：不再"交给浏览器"，所以文案里不能再说"下载后点安装包"。
+         同时要诚实 —— 系统那一次安装确认绕不过去（安卓对非应用商店应用的硬性要求），
+         写进提示里，比让用户以为"点了没反应"要好。 -->
+    <string name="update_dl_title">正在下载更新</string>
+    <string name="update_downloading">正在下载 v%1$s…</string>
+    <string name="update_downloading_pct">正在下载 v%1$s… %2$d%%</string>
+    <string name="update_dl_failed">下载失败，请检查网络后重试</string>
+    <string name="update_need_perm">需要先允许本应用「安装未知应用」，授权后会自动接着装</string>
+    <string name="update_no_installer">系统里没有能安装应用的组件</string>
+    <string name="update_auto_started">正在后台下载 v%1$s…</string>
+    <string name="update_auto_ready">更新已下好，正在调起安装</string>
 </resources>

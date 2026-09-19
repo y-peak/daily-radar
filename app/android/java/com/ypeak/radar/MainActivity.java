@@ -10,6 +10,7 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.view.Gravity;
 import android.view.KeyEvent;
@@ -33,6 +34,9 @@ import android.widget.Toast;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
@@ -48,15 +52,29 @@ import java.util.Locale;
  * ⚠️ 注意区分**两层更新**，它们解决的是不同问题：
  *   · **内容更新** —— 完全自动，且已经由站点负责（app.js 轮询 /api/status，
  *     指纹一变就 reload）。壳一行代码都不用改。
- *   · **壳自身更新** —— 就是下面 `checkUpdate()` 干的事。壳很少变，
+ *   · **壳自身更新** —— 就是 `checkUpdate()` 干的事。壳很少变，
  *     所以要"偶尔查一次 + 别唠叨"，而不是每次启动都弹。
+ *
+ * 壳自身更新有三种状态，由"自动更新"开关和 `forceDownload` 决定：
+ *
+ *   | 场景             | 触发方式            | 行为                       |
+ *   |------------------|---------------------|----------------------------|
+ *   | 关（默认）       | 冷启动 / 页脚按钮   | 弹窗问 → 用户点"立即更新"   |
+ *   | 开               | 冷启动（1 小时闸）  | 不弹窗，静默下载 → 拉起安装 |
+ *   | 任意             | 设置页"下载并安装"  | 跳过一切闸门，直接下        |
+ *
+ * ⚠️ **诚实边界**：即便开了自动更新，系统仍会弹一次安装确认。这是安卓对
+ *    所有"非应用商店来源"的硬性要求 —— 想真正零点击只能靠 root 或
+ *    Device Owner（设备管理），普通 sideload 应用做不到。
+ *    所以设置页上把这句话写出来了，不假装"完全不用管"。
  *
  * 五个必须自己处理的地方（不做就会被用户感知为"这破 App 有问题"）：
  *   1. 站外链接（GitHub 仓库、许可证页…）要用系统浏览器打开，不能困在 WebView 里
  *   2. 断网要有可重试的提示页，不能只留一片白屏
  *   3. 返回键要能网页后退，而不是直接退出
  *   4. 顶端下拉刷新 —— 用户对 WebView 应用的默认预期
- *   5. 有新版本要能自己发现 —— 否则用户永远停在装的那一版
+ *   5. 有新版本要能自己发现，并且**能在应用内装掉** ——
+ *      否则用户要么永远停在旧版，要么每次都得跳到浏览器去绕一圈
  */
 public class MainActivity extends Activity {
 
@@ -71,10 +89,46 @@ public class MainActivity extends Activity {
     /** 版本检查的最小间隔：壳很少变，启动就弹会变成骚扰。 */
     private static final long UPDATE_CHECK_INTERVAL_MS = 6L * 60 * 60 * 1000;
 
+    /**
+     * 开了"自动更新"之后的检查间隔（1 小时）。
+     *
+     * 为什么比手动模式短得多：用户把这个开关打开，意思就是"你看着办，别问我"。
+     * 还按 6 小时算的话，他一天开两次 App 也可能整整一天收不到更新，
+     * 会以为开关没生效。1 小时既够及时，也不至于每次冷启动都打一次请求。
+     */
+    private static final long AUTO_CHECK_INTERVAL_MS = 60L * 60 * 1000;
+
+    /** 下载落地的文件名。
+     *
+     * 刻意用**固定名**而不是带上版本号：带版本号的话，每升一次版就在
+     * 应用外部目录里留一个几十上百 KB 的旧包，永远不会有人来清。
+     * 固定名 = 每次覆盖，天然自清理。文件名也不影响安装界面显示什么
+     * （那里显示的是 app 的 label），所以没有别的代价。 */
+    private static final String DL_FILE = "radar-update.apk";
+
+    /** SharedPreferences 里的键名，集中放一处免得拼错。 */
+    private static final String PREF_AUTO = "auto_update";
+
     private SharedPreferences prefs;
 
     /** 正在显示的更新对话框。Activity 销毁时要主动关掉，否则会带着已死的窗口泄漏。 */
     private AlertDialog updateDialog;
+
+    /** 下载进度框。和 updateDialog 分开持有 —— 两者可能先后出现，别互相踩。 */
+    private AlertDialog dlDialog;
+    private ProgressBar dlBar;
+    private TextView dlMsg;
+
+    /** 下载互斥。网页上的按钮和壳自己的自动检查是两个入口，不加锁会同时下两份。 */
+    private volatile boolean downloading = false;
+
+    /**
+     * 已经下好、但还差"安装未知应用"权限的那个包。
+     *
+     * 用户被引到系统设置页授权后回到 App 时，用它把安装接着做完 ——
+     * 否则用户授完权回来发现"什么都没发生"，还得自己再点一次下载。
+     */
+    private File pendingApk;
 
     @Override
     protected void onCreate(Bundle state) {
@@ -183,30 +237,109 @@ public class MainActivity extends Activity {
                 }
             });
         }
+
+        /**
+         * "自动更新"开关的当前值。设置页拿它来画开关的初始状态。
+         *
+         * ⚠️ 真值在原生这边（SharedPreferences），不在网页的 localStorage 里。
+         * 网页那份只是显示用 —— 两边各存一份迟早会不一致，
+         * 而不一致的表现是"开关看着是开的、实际没生效"，很难查。
+         */
+        @JavascriptInterface
+        public boolean getAutoUpdate() {
+            return autoUpdateEnabled();
+        }
+
+        /**
+         * 开关"自动更新"。
+         *
+         * 打开时立刻查一次：用户刚表达完"我要自动更新"，如果还要等下一个
+         * 小时窗口才动，他会觉得开关没反应。
+         */
+        @JavascriptInterface
+        public void setAutoUpdate(final boolean on) {
+            if (prefs != null) {
+                prefs.edit().putBoolean(PREF_AUTO, on).apply();
+            }
+            if (on) {
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        checkUpdate(false);
+                    }
+                });
+            }
+        }
+
+        /** 现在能不能安装应用（即"安装未知应用"是否已授权）。设置页据此决定要不要显示授权卡片。 */
+        @JavascriptInterface
+        public boolean canInstall() {
+            return canInstallPackages();
+        }
+
+        /** 跳到"安装未知应用"的授权页。 */
+        @JavascriptInterface
+        public void openInstallSettings() {
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    gotoInstallPermission();
+                }
+            });
+        }
+
+        /**
+         * 设置页上的"下载并安装"：跳过一切闸门，直接下最新的那个包。
+         *
+         * 和 {@link #checkForUpdate()} 的区别在于**不会只弹个对话框** ——
+         * 用户是在设置页明确按了这个按钮，意图已经足够清楚了。
+         */
+        @JavascriptInterface
+        public void downloadUpdate() {
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    checkUpdate(true, true);
+                }
+            });
+        }
     }
 
     // ================================================================== 检测新版本
     /**
-     * 问服务器"现在最新是哪个版本"，比自己新就提示。
+     * 问服务器"现在最新是哪个版本"，比自己新就提示 —— 或者，开了自动更新就直接下。
      *
      * 几条刻意的选择：
      *   · **放后台线程** —— 网络请求绝不能上主线程（会 ANR）。
-     *   · **失败就静默** —— 查更新失败绝不能打扰用户，它只是个附赠能力。
-     *   · **6 小时最多查一次**，且**跳过过的版本不再弹**
-     *     —— 否则每次冷启动都弹，用户会直接卸载。
-     *   · **下载交给系统浏览器**，不在 App 内装。小米/华为这类 ROM 对
-     *     "应用内拉起安装"限制很多，交给浏览器反而最稳。
-     *   · 不申请 `REQUEST_INSTALL_PACKAGES` —— 那是应用内安装才需要的敏感权限。
+     *   · **失败就静默** —— 自动查更新失败绝不能打扰用户，它只是个附赠能力。
+     *   · **间隔随模式而变**：手动模式 6 小时最多一次（免得变成骚扰），
+     *     自动模式 1 小时（用户已经说了"你看着办"）。
+     *   · **"跳过这个版本"只在会弹窗的那条路径上生效** —— 开了自动更新时
+     *     那个按钮根本看不到，再去拦就成了开关不起作用。
+     *   · **主动模式跳过所有闸门** —— 用户点了"检查更新"却什么也不发生，是最糟的体验。
+     *   · **下载在 App 内完成**（见 startDownload）。以前是丢给系统浏览器，
+     *     用户得在两个应用之间来回跳，下完还要自己找安装包 —— 现在不用了。
+     *
+     * @param manual        人主动触发的（必须有反馈）
+     * @param forceDownload 不管开关如何，发现新版就直接下（设置页的"下载并安装"）
      */
     private void checkUpdate(final boolean manual) {
+        checkUpdate(manual, false);
+    }
+
+    private void checkUpdate(final boolean manual, final boolean forceDownload) {
+        final boolean auto = autoUpdateEnabled();
         if (!manual) {
-            // 自动模式：6 小时最多查一次。**主动模式跳过这个闸** ——
-            // 用户点了"检查更新"却什么也不发生，是最糟的体验。
+            // 只有自动触发才看间隔。主动模式跳过 —— 见上面注释。
+            final long interval = auto ? AUTO_CHECK_INTERVAL_MS : UPDATE_CHECK_INTERVAL_MS;
             final long last = prefs.getLong("last_check", 0L);
-            if (System.currentTimeMillis() - last < UPDATE_CHECK_INTERVAL_MS) {
+            if (System.currentTimeMillis() - last < interval) {
                 return;
             }
         }
+        // 这一趟要不要"静默自动下"：要开过开关，且不是设置页里手动按的下载。
+        final boolean autoThisRun = auto && !forceDownload;
+
         new Thread(new Runnable() {
             @Override
             public void run() {
@@ -236,6 +369,11 @@ public class MainActivity extends Activity {
                     final JSONObject o = new JSONObject(sb.toString());
                     final int code = o.optInt("versionCode", 0);
                     final String name = o.optString("versionName", "");
+                    // 服务器会给**确定那个文件**的路径（形如 /dl/radar-1.5.apk）。
+                    // 老服务器没有这个字段时是空串 → 下载时回落到 /app 别名。
+                    final String path = o.optString("url", "");
+                    final String shown = (name == null || name.length() == 0)
+                            ? String.valueOf(code) : name;
 
                     prefs.edit().putLong("last_check", System.currentTimeMillis()).apply();
 
@@ -248,13 +386,21 @@ public class MainActivity extends Activity {
                     }
                     // 自动模式尊重"跳过这个版本"；用户主动来问时**不再拦截** ——
                     // 他既然主动问了，就是想知道，哪怕之前点过"跳过"。
-                    if (!manual && prefs.getInt("skipped", 0) >= code) {
+                    if (!manual && !autoThisRun && prefs.getInt("skipped", 0) >= code) {
                         return;
                     }
                     runOnUiThread(new Runnable() {
                         @Override
                         public void run() {
-                            promptUpdate(code, name);
+                            if (autoThisRun) {
+                                // 用户要的就是"不用管"：不弹窗，直接下。
+                                // 进度也不弹框 —— 冷启动时糊一个不能取消的进度框
+                                // 会把"打开看一眼"这件事挡住，得不偿失。
+                                toastUi(getString(R.string.update_auto_started, shown));
+                                startDownload(code, shown, path, true);
+                            } else {
+                                promptUpdate(code, shown, path);
+                            }
                         }
                     });
                 } catch (Exception e) {
@@ -272,19 +418,30 @@ public class MainActivity extends Activity {
         }, "update-check").start();
     }
 
+    /** 开没开"自动更新"。prefs 在某些早期调用路径上可能还没初始化。 */
+    private boolean autoUpdateEnabled() {
+        return prefs != null && prefs.getBoolean(PREF_AUTO, false);
+    }
+
+    /** 在主线程上弹一个 Toast；Activity 已经不在了就安静吞掉。 */
+    private void toastUi(final String msg) {
+        if (isFinishing() || isDestroyed()) {
+            return;
+        }
+        Toast.makeText(this, msg, Toast.LENGTH_SHORT).show();
+    }
+
     /** 从后台线程发 Toast —— Toast 必须回到主线程。 */
     private void toastLater(final String msg) {
         runOnUiThread(new Runnable() {
             @Override
             public void run() {
-                if (!isFinishing() && !isDestroyed()) {
-                    Toast.makeText(MainActivity.this, msg, Toast.LENGTH_SHORT).show();
-                }
+                toastUi(msg);
             }
         });
     }
 
-    private void promptUpdate(final int code, String name) {
+    private void promptUpdate(final int code, final String shown, final String path) {
         // ⚠️ 必须同时查 isFinishing() 和 **isDestroyed()**：
         //    查更新的线程可能在 Activity 已经销毁之后才回到主线程，
         //    这时 show() 会抛 BadTokenException 直接崩掉。
@@ -293,14 +450,13 @@ public class MainActivity extends Activity {
         if (isFinishing() || isDestroyed()) {
             return;
         }
-        String shown = (name == null || name.length() == 0) ? String.valueOf(code) : name;
         AlertDialog dlg = new AlertDialog.Builder(this)
                 .setTitle(R.string.update_title)
                 .setMessage(getString(R.string.update_msg, shown, AppConfig.VERSION_NAME))
                 .setPositiveButton(R.string.update_now, new DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(DialogInterface d, int w) {
-                        openDownload();
+                        startDownload(code, shown, path, false);
                     }
                 })
                 .setNegativeButton(R.string.update_later, null)
@@ -316,12 +472,270 @@ public class MainActivity extends Activity {
         dlg.show();
     }
 
-    /** 交给系统浏览器：下载 + 安装都由它负责，比 App 内自己装可靠得多。 */
-    private void openDownload() {
+    // ================================================================== 应用内下载 + 安装
+    /**
+     * 在 App 内把安装包下下来，下完交给系统安装器。
+     *
+     * 为什么不再"丢给系统浏览器"：那条路每一步都要用户动手 ——
+     * 点更新 → 跳浏览器 → 等下载 → 再点通知/文件 → 点安装。
+     * 用户的原话是"每次都需要我自己点"，指的就是这个。
+     *
+     * @param silent 自动更新模式：不弹进度框。用户在冷启动时糊一个不能取消的
+     *               进度框挡在内容前面，比"没提示"更烦。
+     */
+    private void startDownload(final int code, final String shown,
+                               final String path, final boolean silent) {
+        if (downloading) {
+            return;                      // 网页按钮和自动检查是两个入口，必须互斥
+        }
+        File dir = getExternalFilesDir(null);
+        if (dir == null) {
+            dir = getCacheDir();
+        }
+        final File out = new File(dir, DL_FILE);
+        downloading = true;
+        if (!silent) {
+            showDownloadDialog(shown);
+        }
+
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                HttpURLConnection conn = null;
+                InputStream in = null;
+                FileOutputStream fos = null;
+                try {
+                    // ⚠️ 路径来自服务器（/api/app 的 url 字段），不是我们自己拼的。
+                    //    它一定是 `/dl/xxx.apk` 这种站内相对路径；但**不能盲信**：
+                    //    只要不是以 / 开头，就退回官方别名，避免被拼成奇怪的外站地址。
+                    String rel = (path != null && path.startsWith("/") && path.length() > 1
+                            && path.indexOf("//") < 0) ? path : "/app";
+                    String url = AppConfig.BASE_URL + rel + AppConfig.TOKEN_QUERY;
+
+                    conn = (HttpURLConnection) new URL(url).openConnection();
+                    conn.setConnectTimeout(10000);
+                    conn.setReadTimeout(30000);       // 包有百来 KB，给宽一点
+                    conn.setInstanceFollowRedirects(true);
+                    if (conn.getResponseCode() != 200) {
+                        failDownload();
+                        return;
+                    }
+                    final int total = conn.getContentLength();
+                    in = conn.getInputStream();
+                    fos = new FileOutputStream(out);   // 固定名 → 覆盖上一次的残包
+                    byte[] buf = new byte[16 * 1024];
+                    long got = 0;
+                    int n, lastPct = -1;
+                    while ((n = in.read(buf)) > 0) {
+                        fos.write(buf, 0, n);
+                        got += n;
+                        if (total > 0) {
+                            int pct = (int) (got * 100 / total);
+                            if (pct != lastPct) {
+                                lastPct = pct;
+                                setDownloadProgress(shown, pct);
+                            }
+                        }
+                    }
+                    fos.flush();
+                    fos.close();
+                    fos = null;
+                    in.close();
+                    in = null;
+
+                    // ⚠️ 这里必须验"真的下到了东西"。
+                    //    网络在半路断掉时，read() 可能正常返回 -1（EOF）而**不抛异常**，
+                    //    于是我们手里就是一个截断的 APK。直接丢给安装器的话，
+                    //    用户看到的是"解析包时出现问题"这种莫名其妙的错误。
+                    if (out.length() <= 0) {
+                        failDownload();
+                        return;
+                    }
+                    downloading = false;
+                    hideDownloadDialog();
+                    if (silent) {
+                        toastLater(getString(R.string.update_auto_ready));
+                    }
+                    installApk(out);
+                } catch (Exception e) {
+                    // 断网、磁盘满、下载中被切…… 一律按"下载失败"处理，别崩
+                    failDownload();
+                } finally {
+                    try { if (fos != null) fos.close(); } catch (Exception ignored) { }
+                    try { if (in != null) in.close(); } catch (Exception ignored) { }
+                    if (conn != null) {
+                        conn.disconnect();
+                    }
+                }
+            }
+        }, "update-download").start();
+    }
+
+    private void failDownload() {
+        downloading = false;
+        hideDownloadDialog();
+        toastLater(getString(R.string.update_dl_failed));
+    }
+
+    /** 进度框。刻意**不能取消**：下到一半退出会留下一个残包，反而更难解释。 */
+    private void showDownloadDialog(final String shown) {
+        if (isFinishing() || isDestroyed()) {
+            return;
+        }
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        int pad = dp(22);
+        box.setPadding(pad, pad, pad, pad);
+
+        dlMsg = new TextView(this);
+        dlMsg.setText(getString(R.string.update_downloading, shown));
+
+        dlBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        dlBar.setMax(100);
+        // 先转圈：Content-Length 不一定拿得到（分块传输就没有），
+        // 拿到了再切成确定进度。反过来做的话，拿不到长度时进度条会一直卡在 0%。
+        dlBar.setIndeterminate(true);
+
+        box.addView(dlMsg, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = dp(14);
+        box.addView(dlBar, lp);
+
+        AlertDialog d = new AlertDialog.Builder(this)
+                .setTitle(R.string.update_dl_title)
+                .setView(box)
+                .setCancelable(false)
+                .create();
+        dlDialog = d;
+        d.show();
+    }
+
+    private void setDownloadProgress(final String shown, final int pct) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (dlBar == null) {
+                    return;
+                }
+                if (dlBar.isIndeterminate()) {
+                    dlBar.setIndeterminate(false);
+                    dlBar.setProgress(0);
+                }
+                dlBar.setProgress(pct);
+                if (dlMsg != null) {
+                    dlMsg.setText(getString(R.string.update_downloading_pct, shown, pct));
+                }
+            }
+        });
+    }
+
+    private void hideDownloadDialog() {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (dlDialog != null) {
+                    if (dlDialog.isShowing()) {
+                        dlDialog.dismiss();
+                    }
+                    dlDialog = null;
+                }
+                dlBar = null;
+                dlMsg = null;
+            }
+        });
+    }
+
+    // ------------------------------------------------------------ 交给系统安装器
+    /**
+     * 把下好的包交给系统安装器。
+     *
+     * ⚠️ 没授权"安装未知应用"时，**必须先引导授权，而不是硬拉安装器** ——
+     * 硬拉的结果是安装界面弹出来又立刻失败，用户只看到"更新没反应"。
+     * 授权走系统设置页，回来后由 onResume 接着装（用户不用再点一次）。
+     */
+    private void installApk(final File apk) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (isFinishing() || isDestroyed()) {
+                    return;
+                }
+                if (!canInstallPackages()) {
+                    pendingApk = apk;
+                    toastUi(getString(R.string.update_need_perm));
+                    gotoInstallPermission();
+                    return;
+                }
+                pendingApk = null;
+                launchInstaller(apk);
+            }
+        });
+    }
+
+    /** 能不能"安装未知应用"。API 26 之前没有这个开关，一律算可以。 */
+    private boolean canInstallPackages() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            return true;
+        }
         try {
-            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(AppConfig.APK_URL)));
+            return getPackageManager().canRequestPackageInstalls();
+        } catch (Exception e) {
+            return true;                 // 判断不了就别拦着，交给安装器去报错
+        }
+    }
+
+    /** 跳到本应用的"安装未知应用"授权页。 */
+    private void gotoInstallPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            return;
+        }
+        try {
+            startActivity(new Intent(
+                    android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                    Uri.parse("package:" + getPackageName())));
+            return;
         } catch (ActivityNotFoundException ignored) {
-            // 没有浏览器（极罕见）就算了，别崩
+            // 个别 ROM 没做这个页面
+        }
+        try {
+            startActivity(new Intent(
+                    android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    Uri.parse("package:" + getPackageName())));
+        } catch (ActivityNotFoundException ignored) {
+            // 连应用详情页都没有（极罕见）：那就只能靠用户自己找设置了
+        }
+    }
+
+    /**
+     * 真的拉起安装。
+     *
+     * 用 `content://` 而不是 `file://` —— 从 API 24 起后者跨应用传递会直接抛
+     * FileUriExposedException。URI 由 {@link ApkProvider} 提供，
+     * 并用 FLAG_GRANT_READ_URI_PERMISSION 临时授权给安装器。
+     */
+    private void launchInstaller(File apk) {
+        Uri uri = ApkProvider.uriFor(apk.getName());
+        Intent view = new Intent(Intent.ACTION_VIEW);
+        view.setDataAndType(uri, "application/vnd.android.package-archive");
+        view.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                | Intent.FLAG_ACTIVITY_NEW_TASK);
+        try {
+            startActivity(view);
+            return;
+        } catch (ActivityNotFoundException ignored) {
+            // 少数 ROM 只认老式的 INSTALL_PACKAGE，继续往下试
+        }
+        Intent alt = new Intent(Intent.ACTION_INSTALL_PACKAGE);
+        alt.setData(uri);
+        alt.putExtra(Intent.EXTRA_NOT_UNKNOWN_SOURCE, true);
+        alt.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                | Intent.FLAG_ACTIVITY_NEW_TASK);
+        try {
+            startActivity(alt);
+        } catch (ActivityNotFoundException e) {
+            toastUi(getString(R.string.update_no_installer));
         }
     }
 
@@ -451,6 +865,14 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         web.onResume();
+        // 用户刚去系统设置里授权"安装未知应用"，现在回来了 —— 把之前下好的包接着装上。
+        // 没有这一步的话，用户授完权会发现"什么都没发生"，还得自己再点一次下载，
+        // 这正是这次要消灭的那种体验。
+        if (pendingApk != null && canInstallPackages()) {
+            File apk = pendingApk;
+            pendingApk = null;
+            launchInstaller(apk);
+        }
     }
 
     @Override
@@ -461,7 +883,7 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
-        // 先关掉可能还开着的更新对话框：Activity 都要销毁了，
+        // 先关掉可能还开着的对话框：Activity 都要销毁了，
         // 留着一个挂在已死窗口上的对话框只会造成 WindowLeaked。
         if (updateDialog != null) {
             if (updateDialog.isShowing()) {
@@ -469,6 +891,14 @@ public class MainActivity extends Activity {
             }
             updateDialog = null;
         }
+        if (dlDialog != null) {
+            if (dlDialog.isShowing()) {
+                dlDialog.dismiss();
+            }
+            dlDialog = null;
+        }
+        dlBar = null;
+        dlMsg = null;
         // 摘掉 JS 桥再销毁 WebView：桥持有 Activity 的隐式引用，
         // 留着它会让已死的 Activity 被 JS 侧继续引用。
         web.removeJavascriptInterface("RadarNative");

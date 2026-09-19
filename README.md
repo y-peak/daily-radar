@@ -158,23 +158,49 @@ cd app/android
 | 层 | 谁负责 | 怎么触发 |
 |---|---|---|
 | **内容**（榜单、报告） | 站点 | `app.js` 轮询 `/api/status`，指纹一变就 reload。**壳零代码** |
-| **壳自身**（APK） | App | 启动时问 `/api/app`，`versionCode` 更大就弹窗提示升级 |
+| **壳自身**（APK） | App | 启动时问 `/api/app`，`versionCode` 更大就下载并调起安装 |
 
-壳的更新检测刻意做了约束：**6 小时最多查一次** / **可以"跳过这个版本"**（记住 `skipped`）/
-**失败静默**（查更新挂了绝不打扰用户）/ **下载交给系统浏览器**（国行 ROM 对"应用内拉起安装"
-限制多，交给浏览器最稳，也因此**不需要** `REQUEST_INSTALL_PACKAGES` 这个敏感权限）。
+壳自身的更新有三种状态，由 **`/settings/` 里的「自动更新」开关**决定：
+
+| 场景 | 触发方式 | 行为 |
+|---|---|---|
+| 关（默认） | 冷启动 / 页脚版本按钮 | 弹窗问一句 → 点「立即更新」才下 |
+| 开 | 冷启动（**1 小时**闸） | 不弹窗、不弹进度框，静默下载 → 调起安装 |
+| 任意 | 设置页「下载并安装」 | 跳过所有闸门，直接下 |
+
+其它约束：手动模式 **6 小时最多查一次** / **可以"跳过这个版本"**（记住 `skipped`，只在会弹窗的路径上生效）/
+**查更新失败静默**（绝不打扰用户）。
+
+⚠️ **诚实边界**：即便开了自动更新，**系统仍会弹一次安装确认**。这是安卓对所有
+"非应用商店来源"的硬性要求 —— 真正做到零点击只能靠 root 或 Device Owner（设备管理），
+普通 sideload 应用做不到。所以设置页上把这句话写出来了，不假装"完全不用管"。
+
+下载与安装都在 App 内完成（`MainActivity.startDownload` → `ApkProvider` → 系统安装器）：
+
+* 需要 `REQUEST_INSTALL_PACKAGES` 权限；没授权时**先引导去授权**，回来由 `onResume` 接着装
+* APK 通过自建的 `ApkProvider`（`content://com.ypeak.radar.apk/...`）交给安装器 ——
+  从 API 24 起跨应用传 `file://` 会被系统拒绝，而工程不引 AndroidX，所以没用 `FileProvider`
+* 下载目录用**固定文件名** `radar-update.apk`，每次覆盖，不留历史残包
+* 下完会验长度：链路中断时 `read()` 可能正常返回 EOF 而不抛异常，
+  不验就会把截断的包丢给安装器，报出"解析包时出现问题"这种莫名其妙的错
 
 > `/api/app` 的版本元数据来自构建时落下的 sidecar JSON —— `versionCode` **不在文件名里**，
-> 光看 `radar-1.2.apk` 只能拿到 versionName。sidecar 缺失时 `versionCode` 退化为 **0**，
+> 光看 `radar-1.5.apk` 只能拿到 versionName。sidecar 缺失时 `versionCode` 退化为 **0**，
 > 方向是安全的（App 侧判据是"服务器 > 本地才提示"，0 只会导致不提示，不会误报）。
+>
+> `url` 字段给的是**具体那个文件**（`/dl/radar-1.5.apk`），不是 `/app` 别名。
+> 别名每次请求都重新挑"最新的包"，而 App 是"先问版本、再下载"两次请求 ——
+> 中间刚好传了新包，App 就会拿 v1.5 的版本号去下 v1.6 的包，
+> 表现为"更新完还提示有新版"，自相矛盾且极难复现。
 
 ### 下载入口
 
 | 路径 | 说明 |
 |---|---|
 | `/app` | **短链**（推荐，手机上好敲）：`https://118.196.100.121/app?t=<口令>` |
-| `/dl/latest.apk` | 同上，`latest` 按 mtime 取最新 |
-| `/dl/radar-1.2.apk` | 指定版本 |
+| `/dl/latest.apk` | 同上，`latest` 挑的是**版本号最高**的那个（不是 mtime 最新的） |
+| `/dl/radar-1.5.apk` | 指定版本 —— `/api/app` 的 `url` 字段给的就是这种确定路径 |
+| `/settings/` | App 设置页：自动更新开关、安装权限、手动下载安装 |
 
 都在统一鉴权之后（`APK` 里内嵌了口令，公开可下等于把口令挂网上）。
 `<root>/apk/` **故意放在 `public/` 之外** —— `build_site` 每轮先 `rmtree(public)`，放里面会被删。
@@ -557,13 +583,14 @@ token 用量、**真实模型名**全打出来。两个判断点最有价值：
 | `GET` | `/api/status` | 指纹、最新日期、上次运行结果、是否正在采集、各模块概况（**内容**更新口子） |
 | `POST` | `/api/refresh` | 触发一轮采集（异步，202 立即返回；已在跑则 409） |
 | `GET` | `/api/modules` | 模块清单 |
-| `GET` | `/api/app` | 安卓壳的最新版本：`versionCode` / `versionName` / `size` / `sha256` / `url`（**壳自身**更新口子） |
+| `GET` | `/api/app` | 安卓壳的最新版本：`versionCode` / `versionName` / `size` / `sha256` / `url`（**壳自身**更新口子；`url` 是具体文件名，不是 `/app` 别名） |
 
 ### 静态/下载
 
 | 路径 | 说明 |
 |---|---|
 | `/<path>` | 预渲染的静态页面（`public/`） |
+| `/settings/` | App 设置页 —— 核心页，由 `render.py` 的 `core_pages` 生成，同样套 `base.html` 外壳 |
 | `/static/<rel>` | ⚠️ **优先取 `public/static/` 的预构建副本**，没有再回落 `radar/static/`。改了 `radar/static/` 必须 `python -m radar build` 才生效 |
 | `/app` · `/dl/<name>` | 安卓 APK 下载（`<root>/apk/`，在鉴权之后） |
 

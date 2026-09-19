@@ -328,7 +328,17 @@ def create_app(root: Path | None = None) -> Flask:
                     meta.update({k: v for k, v in data.items() if k in meta})
             except (OSError, ValueError):
                 pass          # sidecar 坏了就用手上的，别让接口 500
-        meta["url"] = "/app"
+        # ⚠️ 这里给的是**具体那个文件**的路径，不是 `/app` 别名。
+        #
+        # 为什么不用 `/app`：它每次请求都重新挑一次"最新的那个包"。App 的行为是
+        # "先问版本 → 再下载"，两次请求之间隔着若干秒 —— 刚好在这中间传了新包，
+        # App 就会拿着 v1.5 的版本号去下 v1.6 的包。通常无害，但会出现
+        # "更新完还是提示有新版"这种自相矛盾的观感，而且极难复现。
+        # 给确定路径就没这个问题：报的版本和给的包是**同一次读取**里取出来的。
+        #
+        # 兼容性：`/dl/<name>` 一直是公开路由，老版本 App 忽略这个字段、照旧用
+        # AppConfig.APK_URL（`/app`），所以改这里不会让已装的 App 出问题。
+        meta["url"] = f"/dl/{target.name}"
         return jsonify(meta)
 
     @app.post("/api/refresh")

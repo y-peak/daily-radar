@@ -1,0 +1,73 @@
+{# 设置页 —— 核心页（不属于任何模块）。
+
+   ⚠️ 这一页**故意是个空壳**：所有值都由 app.js::setupSettings() 从安卓壳的
+   JS 桥（window.RadarNative）里读，页面上没有一行服务端注入的数据。
+
+   为什么这么做：这些设置描述的是"客户端的行为"（自动更新、安装权限），
+   服务端根本不知道也管不着。写成静态壳 + 运行时取值，才不会出现
+   "页面说有新版本、其实服务器自己都不知道"这种假信息。
+
+   ⚠️ 浏览器里没有桥。此时**必须明说"这些设置只在 App 内生效"**，
+   而不是把开关画出来让人点 —— 一个点了没有用的开关比没有开关更糟。
+   所以 #set-native 默认 hidden，只有检测到桥才露出来。 #}
+
+<section data-no-collapse class="panel set-intro">
+  <h2>设置</h2>
+  <p class="hint" id="set-env">正在检测运行环境…</p>
+</section>
+
+<div id="set-native" hidden>
+
+  <section data-no-collapse class="panel">
+    <h2>自动更新</h2>
+    <div class="set-row">
+      <label class="set-label" for="auto-update">
+        <span class="set-name">有新版本时自动下载并安装</span>
+        <span class="set-desc">不再弹窗询问。发现新版本就在后台下载，下完直接调起系统安装。</span>
+      </label>
+      <span class="set-switch">
+        <input type="checkbox" id="auto-update">
+        <i aria-hidden="true"></i>
+      </span>
+    </div>
+    <p class="set-note">
+      系统仍会弹一次安装确认 —— 这是安卓对非应用商店应用的硬性要求，
+      App 无法绕过。除此之外不用你再点任何东西。
+    </p>
+  </section>
+
+  <section data-no-collapse class="panel">
+    <h2>版本</h2>
+    <div class="set-kv"><span>当前</span><span id="set-cur">—</span></div>
+    <div class="set-kv"><span>最新</span><span id="set-latest">—</span></div>
+    <div class="set-actions">
+      <button type="button" class="set-btn" id="set-check">检查更新</button>
+      <button type="button" class="set-btn primary" id="set-dl" hidden>下载并安装</button>
+    </div>
+    <p class="set-note" id="set-msg"></p>
+  </section>
+
+  <section data-no-collapse class="panel" id="set-perm-panel" hidden>
+    <h2>安装权限</h2>
+    <p class="prose">
+      安卓要求：安装别的应用之前，需要先允许本应用「安装未知应用」。
+      授权一次即可，之后自动更新就不再需要它了。
+    </p>
+    <div class="set-actions">
+      <button type="button" class="set-btn primary" id="set-perm">去授权</button>
+    </div>
+  </section>
+
+</div>
+
+{# 浏览器里看到的版本：把"为什么这里没开关"和"怎么办"一次说清。 #}
+<section data-no-collapse class="panel" id="set-web-only" hidden>
+  <h2>这些设置只在 App 内生效</h2>
+  <p class="prose">
+    当前是在浏览器里打开的，没有客户端能力，所以自动更新、安装包下载这些
+    都不可用。用下面的地址装成 App 之后，这里就能用了。
+  </p>
+  <div class="set-actions">
+    <a class="set-btn primary" href="/app">下载安卓 App</a>
+  </div>
+</section>

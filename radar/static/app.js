@@ -521,6 +521,9 @@
     document.querySelectorAll(".panel").forEach(function (p) {
       var h = p.querySelector("h2");
       if (!h) return;
+      /* 设置页的卡片不参与折叠：那里每个标题下面就是控件本身，
+         点一下标题把开关收起来，看起来像"设置项消失了"。 */
+      if (p.hasAttribute("data-no-collapse")) return;
       var key = h.textContent.trim().slice(0, 12);
       if (stored[key]) p.classList.add("is-collapsed");
       h.addEventListener("click", function () {
@@ -613,6 +616,146 @@
         }
       })
       .catch(function () { /* 拿不到就当没新版，别打扰 */ });
+  }
+
+  /* ============================================================ 设置页（/settings/）
+     这一页上的每个动作最后都要经过 JS 桥落到原生，所以：
+       · 有桥 → 解开设置区，值从原生读（绝不写死在 HTML 里）
+       · 没桥 → **明说"只在 App 内生效"**，而不是把开关画出来让人点。
+         一个点了没有反应的开关，比没有开关更让人困惑。
+
+     页面结构在 templates/settings.html，样式在 style.css 第 32 节。 */
+  function setupSettings() {
+    var envEl = document.getElementById("set-env");
+    if (!envEl) return;                        // 不是设置页，直接退
+    var native = window.RadarNative;
+    var nativeBox = document.getElementById("set-native");
+    var webBox = document.getElementById("set-web-only");
+
+    if (!native) {
+      envEl.textContent = "当前是在浏览器里打开的。";
+      envEl.classList.add("is-warn");
+      if (webBox) webBox.hidden = false;
+      return;
+    }
+
+    envEl.textContent = "已连接到安卓 App。";
+    envEl.classList.remove("is-warn");
+    if (nativeBox) nativeBox.hidden = false;
+
+    var sw = document.getElementById("auto-update");
+    var curEl = document.getElementById("set-cur");
+    var latestEl = document.getElementById("set-latest");
+    var msgEl = document.getElementById("set-msg");
+    var checkBtn = document.getElementById("set-check");
+    var dlBtn = document.getElementById("set-dl");
+    var permPanel = document.getElementById("set-perm-panel");
+    var permBtn = document.getElementById("set-perm");
+
+    var curName = "", curCode = 0;
+    try {
+      curName = native.versionName() || "";
+      curCode = native.versionCode() || 0;
+    } catch (e) { /* 桥异常：当作读不到，页面照常可用 */ }
+    if (curEl) curEl.textContent = curName ? ("v" + curName) : "—";
+
+    function say(text, cls) {
+      if (!msgEl) return;
+      msgEl.textContent = text || "";
+      msgEl.className = "set-note" + (cls ? " " + cls : "");
+    }
+
+    /* ---------------- 自动更新开关 ---------------- */
+    if (sw) {
+      var on = false;
+      try { on = !!native.getAutoUpdate(); } catch (e) {}
+      sw.checked = on;
+      sw.addEventListener("change", function () {
+        try { native.setAutoUpdate(sw.checked); } catch (e) {}
+        vibrate(sw.checked ? 12 : 6);
+        say(sw.checked
+          ? "已开启：以后发现新版本会自动下载并调起安装。"
+          : "已关闭：发现新版本时会先问你。",
+          sw.checked ? "is-ok" : "");
+      });
+    }
+
+    /* ---------------- 安装权限 ----------------
+       只在"还没授权"时才把这块露出来 —— 已经能装了还摆一个授权按钮，
+       会让人以为哪里没配好。从系统设置页返回时补查一次。 */
+    function paintPerm() {
+      var ok = true;
+      try { ok = native.canInstall(); } catch (e) {}
+      if (permPanel) permPanel.hidden = !!ok;
+      return ok;
+    }
+    if (permBtn) {
+      permBtn.addEventListener("click", function () {
+        try { native.openInstallSettings(); } catch (e) {}
+      });
+    }
+    paintPerm();
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden) paintPerm();
+    });
+
+    /* ---------------- 版本信息 ---------------- */
+    function paintLatest(o) {
+      var code = o.versionCode || 0;
+      var name = o.versionName || String(code);
+      var newer = code > curCode;
+      if (latestEl) {
+        latestEl.textContent = "";
+        latestEl.appendChild(document.createTextNode("v" + name));
+        if (newer) {
+          var b = document.createElement("span");
+          b.className = "set-badge";
+          b.textContent = "有新版本";
+          latestEl.appendChild(b);
+        }
+      }
+      if (dlBtn) dlBtn.hidden = !newer;
+      return newer;
+    }
+
+    function refresh() {
+      say("正在检查…", "is-busy");
+      /* 走 WebView 自己的 Cookie 鉴权，不用再带 ?t= */
+      fetch("/api/app", { headers: { "Accept": "application/json" }, cache: "no-store" })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (o) {
+          if (!o) { say("检查失败，请检查网络后重试", "is-warn"); return; }
+          var newer = paintLatest(o);
+          say(newer
+            ? ("有新版本 v" + (o.versionName || o.versionCode) + "，可以下载安装")
+            : "已是最新版本",
+            newer ? "is-busy" : "is-ok");
+        })
+        .catch(function () { say("检查失败，请检查网络后重试", "is-warn"); });
+    }
+    refresh();
+
+    if (checkBtn) {
+      checkBtn.addEventListener("click", function () {
+        vibrate(10);
+        /* 让原生跳闸查一次（它同时会更新"上次检查时间"并给反馈） */
+        try { native.checkForUpdate(); } catch (e) {}
+        refresh();
+      });
+    }
+
+    if (dlBtn) {
+      dlBtn.addEventListener("click", function () {
+        vibrate(12);
+        if (!paintPerm()) {
+          say("请先允许本应用「安装未知应用」", "is-warn");
+          try { native.openInstallSettings(); } catch (e) {}
+          return;
+        }
+        say("已开始下载，请稍候…", "is-busy");
+        try { native.downloadUpdate(); } catch (e) { say("下载没能启动", "is-warn"); }
+      });
+    }
   }
 
   /* ============================================================ 把静音恢复 */
@@ -1251,6 +1394,7 @@
   setupShare();
   setupInstallBanner();
   setupAppVersion();
+  setupSettings();
   setupSwipeBetweenModules();
   setupCountUp();
   setupReaderChapter();

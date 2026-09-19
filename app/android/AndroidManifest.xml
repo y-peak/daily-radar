@@ -29,6 +29,21 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
+    <!--
+      ⭐ REQUEST_INSTALL_PACKAGES：应用内安装新版本包所必需（API 26 起）。
+
+      为什么现在要它：以前"立即更新"是丢给系统浏览器去下、去装 ——
+      下载和安装都发生在浏览器里，壳不需要任何安装权限，用户却要
+      在两个应用之间来回跳，下完还得自己找到安装包点一下。
+      改成应用内下载 + 拉起系统安装器之后，就必须要这个权限了。
+
+      ⚠️ 拿到这个权限**不等于**能静默安装。系统仍会弹一次安装确认 ——
+      那是安卓对所有"非应用商店来源"的硬性要求，只有 root 或
+      Device Owner（设备管理）才绕得过去，普通 sideload 应用做不到。
+      所以文案里如实写了"系统会弹一次确认"，不假装零打扰。
+    -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
     <!-- 手机（竖屏为主），不需要任何硬件特性，别让应用商店/系统误判为不兼容 -->
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
 
@@ -55,5 +70,28 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!--
+          把下好的 APK 交给系统安装器时要给一个 URI。从 Android 7（API 24）起，
+          `file://` 形式的 URI 一律被系统拒绝（FileUriExposedException），
+          必须用 `content://`。
+
+          为什么自己写一个 Provider 而不是用现成的 FileProvider：
+          标准做法是 androidx.core 的 FileProvider，但它属于 AndroidX ——
+          而本工程刻意**不引任何依赖库**（不跑 Gradle，整个 APK 只有我们自己
+          编出来的 classes.dex + 资源）。为了一个"把文件读出去"的能力拖进
+          一整个 AndroidX，不划算。框架自带的 ContentProvider 就够了。
+
+          三个属性的作用：
+            · exported=false         —— 别的应用不能随便读我们目录里的文件
+            · grantUriPermissions=true —— 允许我们用 Intent 临时授权给安装器
+            · 配合 Intent 上的 FLAG_GRANT_READ_URI_PERMISSION，
+              安装器只在这一次 Intent 的生命周期内可读，用完自动失效
+        -->
+        <provider
+            android:name=".ApkProvider"
+            android:authorities="com.ypeak.radar.apk"
+            android:exported="false"
+            android:grantUriPermissions="true" />
     </application>
 </manifest>
