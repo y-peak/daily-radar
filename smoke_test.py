@@ -2711,6 +2711,16 @@ try:
                          for b in _built18.values()), True))
     check("三个时段都有看点（大模型不给就落到规则）",
           lambda: eq(all(len(b["focus"]) > 0 for b in _built18.values()), True))
+    # ⭐ 两种"旧"不许叠着说：文件不是今天的(stale) 与 数字不是今天的(behind) 互斥
+    check("⭐ stale 与 behind 不会同时成立",
+          lambda: eq(all((b["stale"] and b["behind"]) is False
+                         for b in _built18.values()), True))
+    # ⚠️ 周六日没有"今天的收盘"，这时候报 behind 就是误报（节假日仍会误报一次，
+    #    所以文案只说"还没有"，不咬定"采集没跑完"）
+    from datetime import datetime as _dt18
+    check("⭐ 周末不报「今天还没有收盘数据」",
+          lambda: eq(all(b["behind"] is False for b in _built18.values())
+                     if _dt18.now().weekday() >= 5 else True, True))
 
     # ---------------------------------------------------------- 网页/接口
     _websrc = (ROOT / "radar" / "web.py").read_text(encoding="utf-8")

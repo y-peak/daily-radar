@@ -391,11 +391,18 @@ def build_brief(cfg: Config, slot: str = "close", http=None, log=None) -> dict:
 
     # 快照是旧的时候必须**说出来**。否则"收盘复盘"下面挂着三天前的指数，
     # 用户会以为是今天的 —— 这种错看着一点都不像错，最危险。
-    # 两种陈旧都要认：文件不是今天的（采集没跑）、以及文件是今天但数字是更早的
-    # （08:00 那次采的是前一日收盘）。
+    #
+    # 两种"旧"要分开：
+    #   stale  —— 文件就不是今天的（采集压根没跑）
+    #   behind —— 文件是今天的，但里面的数字是更早的（08:00 那次采的是前一日收盘）
+    # ⚠️ behind **周末不报**：周六日没有"今天的收盘"，报出来就是误报。
+    #    节假日仍会误报一次，所以文案只说"还没有"，不咬定"采集没跑完"——
+    #    我们分不清"没跑完"和"今天本来就不开市"，那就别替用户下这个判断。
     as_of = mk.get("as_of") or ""
     stale = bool(m_date) and m_date != day
-    behind = bool(as_of) and as_of != day and slot == "close" and not stale
+    ahead_of_close = m_date == day and slot == "close"
+    behind = (bool(as_of) and as_of != day and ahead_of_close
+              and datetime.now().weekday() < 5)
 
     payload = {
         "指数": {k: mk.get(k) for k in
@@ -418,7 +425,7 @@ def build_brief(cfg: Config, slot: str = "close", http=None, log=None) -> dict:
     if stale:
         big_lines.append(f"⚠️ 今天还没采到数据，下面用的是 {m_date} 那份快照")
     elif behind:
-        big_lines.append(f"⚠️ 今天的采集还没跑完，指数是 {as_of} 收盘的（不是今天）")
+        big_lines.append(f"⚠️ 指数还是 {as_of} 收盘的 —— 今天还没有新的收盘数据")
     if view.get("summary"):
         big_lines.append(view["summary"])
     for f in focus[:3]:
