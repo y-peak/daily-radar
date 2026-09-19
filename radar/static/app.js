@@ -868,9 +868,207 @@
 
     /* ⭐ 原生从系统设置页回来时会喊一声，让这块重画。
        系统设置是**另一个 Activity**、权限弹框压根不是 Activity，
-       WebView 自己收不到任何事件 —— 不主动喊，页面就会一直停在旧状态。 */
-    window.RadarReminderRefresh = paintRemind;
+       WebView 自己收不到任何事件 —— 不主动喊，页面就会一直停在旧状态。
+
+       ⚠️ 钩子名仍是 RadarReminderRefresh（原生就是这么喊的），但这里现在
+       把**简报那块也一起重画**：原生喊它的时机（回到前台、权限变了）
+       对两块是同一件事。改名的代价是"新页面 + 旧壳"要破坏兼容 ——
+       而旧壳根本没有 briefInfo，多这一层不值得。 */
+    window.RadarReminderRefresh = function () {
+      paintRemind();
+      paintBrief();
+    };
     paintRemind();
+
+    /* ---------------- 每日简报 ----------------
+       和上面那块同一个原则：**每一条事实都来自原生**。
+       时刻本身是原生存的（见 BriefAlarm），网页只负责显示和回写 ——
+       网页自己算一遍必然和闹钟对不上，而对不上的表现是
+       "设置页写着 8:00、实际没响"，属于最难查的那类。
+
+       和规划提醒的差别：简报内容在**服务器**上，闹钟响的时候原生要去取一次。
+       所以"立刻取一条看看"是有网络耗时的（最多十几秒），按钮必须禁用它，
+       不能让人以为点了没反应。 */
+    var briefRows = document.getElementById("brief-rows");
+    var briefMsg = document.getElementById("brief-msg");
+    var briefTest = document.getElementById("brief-test");
+    var briefPerm = document.getElementById("brief-perm");
+    var briefExactBtn = document.getElementById("brief-exact");
+    var briefBuilt = false;      // 三行只画一次：重画会把正在输入的时刻打断
+
+    function pad2(n) { return (n < 10 ? "0" : "") + n; }
+
+    function paintBrief() {
+      if (!briefRows) return;
+      var info = {};
+      try { info = JSON.parse(native.briefInfo() || "{}") || {}; }
+      catch (e) { info = {}; }
+
+      /* 旧壳没有 briefInfo，返回的是 undefined → 空对象。
+         和上面一样：**先分清"拿不到信息"和"信息说没权限"**，
+         否则会把用户指去开一个跟问题无关的开关。 */
+      if (!info.slots || !info.slots.length) {
+        briefRows.innerHTML = "";
+        briefBuilt = false;
+        if (briefTest) briefTest.hidden = true;
+        if (briefPerm) briefPerm.hidden = true;
+        if (briefExactBtn) briefExactBtn.hidden = true;
+        if (briefMsg) {
+          briefMsg.textContent = "这台 App 还是旧版本，没有每日简报能力。"
+                               + "更新到新版之后这里就能用了。";
+        }
+        return;
+      }
+      if (briefTest) briefTest.hidden = false;
+
+      if (!briefBuilt) {
+        var html = "";
+        for (var i = 0; i < info.slots.length; i++) {
+          var s = info.slots[i];
+          /* ⚠️ 用 textContent 之外还得注意：时段名和 key 都是**原生给的常量**，
+             不是用户输入，所以这里拼 HTML 是安全的；但用户能在时刻框里
+             输入的东西一律走 input.value 赋值（见下面），绝不拼进 HTML。 */
+          html += '<div class="brief-row" data-slot="' + s.key + '">'
+                +   '<label class="set-label" for="brief-on-' + s.key + '">'
+                +     '<span class="set-name">' + s.label + '简报</span>'
+                +     '<span class="brief-when" id="brief-when-' + s.key + '"></span>'
+                +   '</label>'
+                +   '<span class="set-switch">'
+                +     '<input type="checkbox" id="brief-on-' + s.key + '">'
+                +     '<i aria-hidden="true"></i>'
+                +   '</span>'
+                +   '<input type="time" class="brief-time" id="brief-at-' + s.key + '">'
+                + '</div>';
+        }
+        briefRows.innerHTML = html;
+        /* 事件挂在容器上（委托）：三行是**动态生成的**，
+           直接往上挂监听的话，"重画一次"就会丢掉所有监听。 */
+        briefRows.addEventListener("change", function (ev) {
+          if (!ev.target) return;
+          saveBrief();
+        });
+        briefBuilt = true;
+      }
+
+      var anyOn = false;
+      for (var j = 0; j < info.slots.length; j++) {
+        var sl = info.slots[j];
+        var on = document.getElementById("brief-on-" + sl.key);
+        var at = document.getElementById("brief-at-" + sl.key);
+        var when = document.getElementById("brief-when-" + sl.key);
+        var row = briefRows.querySelector('[data-slot="' + sl.key + '"]');
+        if (on) on.checked = !!sl.on;
+        if (at) at.value = pad2(sl.h) + ":" + pad2(sl.m);
+        if (when) {
+          when.textContent = sl.on
+            ? (sl.when ? "下一次 " + sl.when : "已开启，稍后重排")
+            : "已关闭";
+        }
+        if (row) {
+          if (sl.on) row.classList.remove("is-off");
+          else row.classList.add("is-off");
+        }
+        if (sl.on) anyOn = true;
+      }
+
+      if (briefPerm) briefPerm.hidden = !!info.notify;
+      if (briefExactBtn) briefExactBtn.hidden = !!info.exact;
+
+      var m;
+      if (!info.notify) {
+        m = "通知权限没开，简报发不出来。";
+      } else if (!anyOn) {
+        m = "三档都关着 —— 打开哪一档，就会在那个时刻收到一条。";
+      } else if (!info.exact) {
+        m = "系统没给「闹钟与提醒」权限，简报照样会响，但可能晚一会儿。";
+      } else {
+        m = "到点会去服务器取一次大盘简报，弹成系统通知。"
+          + "内容在服务器上生成，所以那一刻手机要能联网。";
+      }
+      if (bootVendor) {
+        m += "另外，" + bootVendor + "这类系统默认不允许后台自启动 ——"
+           + "不开的话闹钟可能压根不响，建议点上面的「去设置自启动」开一下。";
+      }
+      if (briefMsg) briefMsg.textContent = m;
+    }
+
+    /* 把三行读回成一个 JSON 交给原生。**整块替换**，不是改一个字段 ——
+       和 setPlans 一样，只有一条写入路径，就没有"改了一半"的中间状态。 */
+    function saveBrief() {
+      if (!briefRows) return;
+      var rows = briefRows.querySelectorAll(".brief-row");
+      var out = {};
+      for (var i = 0; i < rows.length; i++) {
+        var key = rows[i].getAttribute("data-slot");
+        var on = rows[i].querySelector('input[type="checkbox"]');
+        var at = rows[i].querySelector('input[type="time"]');
+        var v = (at && at.value) || "";
+        var parts = v.split(":");
+        var h = parseInt(parts[0], 10);
+        var mi = parseInt(parts[1], 10);
+        /* 时刻框在"清空"的时候 value 是空串 —— 别把它当成 0:00 存进去，
+           那会变成"半夜十二点弹一条"。原样退回上一个有效值（重画一次）。 */
+        if (!isFinite(h) || !isFinite(mi) || h < 0 || h > 23 || mi < 0 || mi > 59) {
+          say("时刻填得不对，改回原来的了", "is-warn");
+          paintBrief();
+          return;
+        }
+        out[key] = { on: !!(on && on.checked), h: h, m: mi };
+      }
+      var ok = false;
+      try { ok = native.setBrief(JSON.stringify(out)) === true; } catch (e) { ok = false; }
+      if (!ok) {
+        say("没存住 —— 这台 App 读不到设置", "is-warn");
+        paintBrief();
+        return;
+      }
+      /* ⭐ 存住之后**从原生重读一遍**，不要拿 DOM 里的值自己回显：
+         只有原生那份才是真的，排完新的时刻之后"下一次"也就跟着变了。 */
+      say("已保存", "is-ok");
+      paintBrief();
+    }
+
+    if (briefTest) {
+      briefTest.addEventListener("click", function () {
+        vibrate(12);
+        var slot = "";
+        try {
+          var info = JSON.parse(native.briefInfo() || "{}") || {};
+          for (var i = 0; i < (info.slots || []).length; i++) {
+            if (info.slots[i].on) { slot = info.slots[i].key; break; }
+          }
+        } catch (e) { slot = ""; }
+        if (!slot) slot = "close";
+        var label = slot === "morning" ? "早间" : (slot === "intraday" ? "尾盘" : "收盘");
+        briefTest.disabled = true;
+        say("正在取「" + label + "」简报…（要连服务器，等几秒）", "is-busy");
+        var code = "";
+        try { code = String(native.testBrief(slot) || ""); } catch (e) { code = ""; }
+        briefTest.disabled = false;
+        if (code === "ok") {
+          say("已发出「" + label + "」简报 —— 去看通知栏", "is-ok");
+        } else if (code === "nonotify") {
+          say("取到了，但通知权限没开，发不出来", "is-warn");
+        } else if (code === "dup") {
+          say("这一档今天已经发过了", "is-ok");
+        } else {
+          say("没取到 —— 检查手机网络，或稍后再试", "is-warn");
+        }
+        paintBrief();
+      });
+    }
+    if (briefPerm) {
+      briefPerm.addEventListener("click", function () {
+        try { native.requestNotify(); } catch (e) {}
+      });
+    }
+    if (briefExactBtn) {
+      briefExactBtn.addEventListener("click", function () {
+        try { native.openExactAlarmSettings(); } catch (e) {}
+      });
+    }
+
+    paintBrief();
   }
 
   /* ============================================================ 个人规划（App 内）

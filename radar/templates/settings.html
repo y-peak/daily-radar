@@ -61,6 +61,21 @@
     <p class="set-note" id="rem-msg"></p>
   </section>
 
+  <section data-no-collapse class="panel" id="set-brief">
+    <h2>每日简报</h2>
+    {# ⚠️ 这三行是 app.js 按**原生给的事实**画出来的（时段名、开关、时刻、
+       下一次什么时候响），服务端不注入任何值 —— 理由和整页一样：
+       时刻存在手机上（见 BriefAlarm），服务端不知道你几点要提醒。
+       这里只留一个空容器，浏览器里它一直是空的，整块也不会露出来。 #}
+    <div id="brief-rows"></div>
+    <div class="set-actions">
+      <button type="button" class="set-btn" id="brief-test">立刻取一条看看</button>
+      <button type="button" class="set-btn primary" id="brief-perm" hidden>开启通知权限</button>
+      <button type="button" class="set-btn" id="brief-exact" hidden>开启准点提醒</button>
+    </div>
+    <p class="set-note" id="brief-msg"></p>
+  </section>
+
   <section data-no-collapse class="panel" id="set-perm-panel" hidden>
     <h2>安装权限</h2>
     <p class="prose">

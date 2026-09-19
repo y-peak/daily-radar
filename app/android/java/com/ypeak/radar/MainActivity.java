@@ -275,6 +275,10 @@ public class MainActivity extends Activity {
         try {
             Notifier.ensureChannel(this);
             PlanReminder.reschedule(this);
+            // 简报的三档闹钟同理：系统清理后台 / 重启都会把 AlarmManager 里的东西
+            // 抹掉，而"用户打开了 App"是重新排上的最好时机。
+            // 三个时段各用固定 requestCode，重复调用是幂等的。
+            BriefAlarm.reschedule(this);
         } catch (Exception ignored) {
             // 排程失败最坏就是"这次不提醒"；让它把开 App 弄崩才是不可接受的
         }
@@ -554,6 +558,64 @@ public class MainActivity extends Activity {
                 toastLater(getString(R.string.notify_test_failed));
             }
             return ok;
+        }
+
+        /* ---------------- 每日简报（早间 / 尾盘 / 收盘） ----------------
+
+           分工和规划提醒**正好相反**：这里排程还是原生算（原因同前 —— 开机时
+           WebView 没加载，排程信息不能只活在网页里），但**内容要去服务器取**。
+           闹钟响的时候 App 可能压根没打开过，所以原生必须自己会发这个请求，
+           口令是构建期嵌进 AppConfig 的。
+
+           三个方法的分工：
+             briefInfo()  读事实（开关 / 时刻 / 下一次什么时候响 / 权限）
+             setBrief()   写配置（唯一能改排程结果的路径，写完自己重排）
+             testBrief()  立刻取一条发出来 —— 这条链路没法在无头环境里自动验证，
+                          必须给一个一按就能看见结果的入口，否则"到底通没通"
+                          只能等到明天早上 8 点才知道。
+        */
+
+        /**
+         * 设置页要的简报事实，一次性给全（JSON，字段含义见 BriefAlarm.nextInfo）。
+         *
+         * 和 reminderInfo() 一样是 JSON 而不是拼好的句子：文案归网页管，
+         * 改措辞不用重新发版装 APK。
+         */
+        @JavascriptInterface
+        public String briefInfo() {
+            return BriefAlarm.nextInfo(MainActivity.this);
+        }
+
+        /**
+         * 写回简报配置（三个时段的开关与时刻）。返回**到底存住了没有**。
+         *
+         * 用 commit() 且存住了才重排 —— 见 setPlans 里的同类说明。
+         * 这里**不做** Toast 反馈：网页上已经有状态行，同一个结果说两遍是噪音。
+         */
+        @JavascriptInterface
+        public boolean setBrief(String json) {
+            boolean ok = BriefAlarm.save(MainActivity.this, json);
+            if (ok) {
+                maybeAskNotify();
+            }
+            return ok;
+        }
+
+        /**
+         * 立刻取一条简报发出来，返回结果码给网页去说人话：
+         *   ok        发出去了
+         *   nonotify  取到了，但没有通知权限
+         *   nofetch   取不到（网络/服务器/结构不对）
+         *   dup       这个时段今天已经发过（手动测试时不会走到）
+         *
+         * ⚠️ **同步**执行，会阻塞 JavaBridge 线程最多十几秒（连接 5s + 读 7s）。
+         *    这是刻意的：异步就返回不了结果，而这个按钮存在的全部意义
+         *    就在于"一按就知道通没通"。JavaBridge 线程不是 UI 线程，
+         *    WebView 不会被卡住，只是这一次调用要等一会儿。
+         */
+        @JavascriptInterface
+        public String testBrief(String slot) {
+            return BriefAlarm.testNow(MainActivity.this, slot);
         }
     }
 

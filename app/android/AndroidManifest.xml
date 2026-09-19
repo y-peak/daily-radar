@@ -146,5 +146,33 @@
                 <action android:name="android.app.action.SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED" />
             </intent-filter>
         </receiver>
+
+        <!--
+          每日简报（早间 / 尾盘 / 收盘）的接收器。和上面那个是**并列**的两个，
+          不是它的一个分支：用户可能只开简报、不开规划提醒（或反过来），
+          两边必须互不牵连。开机时系统会把两个都叫起来，各自重排各自的闹钟。
+
+          ⚠️ exported 同样必须写 true（理由见上面那段）：
+             收不到 BOOT_COMPLETED 的后果是"重启之后简报永久不响"，且不报错。
+
+          ⚠️ 这个接收器**不是幂等的**（它会真的去拉一次网络并弹通知）。
+             别的应用理论上能伪造 ACTION_BRIEF_DUE 让它提前响一条 ——
+             但三条防线在：① 每个时段每天只发一次（已发记录挡着，in BriefAlarm）；
+             ② 伪造的响应里没有 extra，slot 会退化成收盘；
+             ③ 内容只能来自我们自己的服务器。最坏结果就是那天提前看到一条
+             本来就该收到的简报 —— 拿不到任何额外能力。
+        -->
+        <receiver
+            android:name=".BriefAlarmReceiver"
+            android:exported="true"
+            android:enabled="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.TIME_SET" />
+                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+                <action android:name="android.app.action.SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

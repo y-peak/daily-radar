@@ -2282,9 +2282,16 @@ try:
           lambda: has("NotificationManager.IMPORTANCE_HIGH", _noti))
     check("渠道有声有震动（用户要的是跟微信来消息一样）",
           lambda: has("enableVibration(true)", _noti) and has("setSound(", _noti))
+    # minSdk 24：API 26 起要带渠道构造、更早的版本只能不带渠道 + 手动挂声音震动。
+    # 渠道 id 现在是**参数**（规划提醒和每日简报各一个渠道），所以断言跟着改成
+    # "带渠道构造时用的是传进来的那个 channelId"，而不是写死 CHANNEL_ID ——
+    # 写死的话，哪天多一个渠道这条就又红了，而它想守的其实是"两套都写了"。
     check("API 26 前后两套构造都写了（minSdk 24 兼容）",
-          lambda: has("new Notification.Builder(ctx, CHANNEL_ID)", _noti)
+          lambda: has("new Notification.Builder(ctx, channelId)", _noti)
           and has("new Notification.Builder(ctx)", _noti))
+    check("⭐ 简报单独一个通知渠道（不然系统设置里没法只静音一样）",
+          lambda: has('CHANNEL_BRIEF_ID = "radar_brief"', _noti)
+          and has("notify_brief_channel", _noti))
     check("⭐ PendingIntent 不可变（API 31 起必须声明可变性）",
           lambda: has("PendingIntent.FLAG_IMMUTABLE", _noti))
     check("通知能展开看完整清单", lambda: has("BigTextStyle", _noti))
@@ -2413,8 +2420,11 @@ try:
     check("⭐ 提醒区块是空壳：模板里不注入任何值",
           lambda: eq("{{" in _set2[_set2.index('id="set-remind"'):
                                    _set2.index('id="set-perm-panel"')], False))
+    # 钩子名仍是 RadarReminderRefresh（原生就这么喊），但现在两块都要重画 ——
+    # 原生喊它的时机（回到前台、权限变了）对规划提醒和每日简报是同一件事。
     check("设置页会自己重画（从系统设置页回来时）",
-          lambda: has("window.RadarReminderRefresh = paintRemind", _js3))
+          lambda: has("window.RadarReminderRefresh = function ()", _js3)
+          and has("paintRemind();", _js3) and has("paintBrief();", _js3))
     check("原生从后台回来时喊网页重画",
           lambda: has("refreshReminderUi()", _java))
 
@@ -2802,6 +2812,221 @@ except Exception as exc:  # noqa: BLE001
     print("  [!!] 自选股/简报检查抛异常：")
     print(traceback.format_exc())
     FAILED.append("watchlist")
+
+# ==================================================== 19. 每日简报（原生三档提醒）
+# 这一段守的是"闹钟排了但不响 / 响了但内容拿不到 / 一天弹三条同样的话"这类
+# **看不出来**的失效。逐条对应一个真踩过的判断，不是形式检查。
+print("\n== 19. 每日简报（原生三档提醒）==")
+try:
+    _AD = ROOT / "app" / "android"
+    _brief = (_AD / "java/com/ypeak/radar/BriefAlarm.java").read_text(encoding="utf-8")
+    _brecv = (_AD / "java/com/ypeak/radar/BriefAlarmReceiver.java").read_text(encoding="utf-8")
+    _noti2 = (_AD / "java/com/ypeak/radar/Notifier.java").read_text(encoding="utf-8")
+    _main2 = (_AD / "java/com/ypeak/radar/MainActivity.java").read_text(encoding="utf-8")
+    _cfg2 = (_AD / "java/com/ypeak/radar/AppConfig.java.in").read_text(encoding="utf-8")
+    _mani2 = (_AD / "AndroidManifest.xml").read_text(encoding="utf-8")
+    _build2 = (_AD / "build.sh").read_text(encoding="utf-8")
+    _set3 = (ROOT / "radar/templates/settings.html").read_text(encoding="utf-8")
+    _js4 = (ROOT / "radar/static/app.js").read_text(encoding="utf-8")
+    _css4 = (ROOT / "radar/static/style.css").read_text(encoding="utf-8")
+    _prod_set = ROOT / "public/settings/index.html"
+
+    # ---------------------------------------------------------- 新增的类
+    check("BriefAlarm.java 在", lambda: eq(_brief.find("class BriefAlarm") > 0, True))
+    check("BriefAlarmReceiver.java 在",
+          lambda: eq(_brecv.find("class BriefAlarmReceiver") > 0, True))
+    _cls2 = _build2.split("for cls in", 1)[1].split("do", 1)[0]
+    for _c2 in ("BriefAlarm", "BriefAlarmReceiver"):
+        check(f"build.sh 点名确认 {_c2}.java",
+              (lambda c: (lambda: has(c, _cls2)))(_c2))
+
+    # ---------------------------------------------------------- 三个闹钟
+    for _s2 in ("SLOT_MORNING", "SLOT_INTRADAY", "SLOT_CLOSE"):
+        check(f"有三个时段之一 {_s2}", lambda s=_s2: has(s, _brief))
+    # ⚠️ requestCode 必须互不相同：PendingIntent 的身份把 requestCode 算在内，
+    #    三个时段共用一个的话后设的会替换前面的 —— 表现是"只响一个"，且不报错。
+    check("⭐ 三个时段各有独立的 requestCode（共用一个就会互相顶掉）",
+          lambda: eq(len(re.findall(r"private static final int\[\] REQ = \{(\d+), (\d+), (\d+)\}",
+                                    _brief)[0]), 3))
+    check("⭐ 每个时段一个通知 id（共用一个会让收盘把早间顶掉）",
+          lambda: has("ID_BRIEF_BASE + Math.max(0, indexOf(slot))", _brief)
+          and has("static final int ID_BRIEF_BASE", _noti2))
+    check("⭐ 点简报不掀规划面板（用不同的 requestCode，否则两个 PendingIntent 会互相覆盖）",
+          lambda: has("REQ_TAP_BRIEF", _noti2) and has("briefTapIntent", _noti2))
+
+    # ---------------------------------------------------------- 排程正确性
+    # ⚠️ 这里判的是「没有调用」，不是「文件里没有这个词」——注释里正当地提到了
+    #    为什么不用它，按词判会把自己的说明文当成违规（假红）。
+    check("⭐ 不用 setRepeating（API 19 起它一律不精确，Doze 下基本不准）",
+          lambda: eq("setRepeating(" in _brief, False)
+          and eq("setInexactRepeating(" in _brief, False)
+          and has("setExactAndAllowWhileIdle", _brief))
+    check("用 setExactAndAllowWhileIdle（打盹时也要准点响）",
+          lambda: has("setExactAndAllowWhileIdle", _brief))
+    check("⭐ 没有精确闹钟权限就降级，而不是干脆不排",
+          lambda: has("setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP", _brief))
+    check("⭐ 查已存在的 PendingIntent 用 FLAG_NO_CREATE（否则会顺手新建一个）",
+          lambda: has("PendingIntent.FLAG_NO_CREATE", _brief))
+    check("闹钟带时段 extra，响的时候再核一次",
+          lambda: has("EXTRA_SLOT", _brief) and has("EXTRA_SLOT", _brecv))
+    # ⚠️ 收盘排在 16:40 而不是 15:0x：资金流要 16:30 那次采集才落库。
+    #    排 15:05 的话，通知上写着"收盘复盘"、内容却是上一交易日的。
+    check("⭐ 收盘默认 16:40（数据 16:30 才落库，排 15:0x 就会拿到前一天的）",
+          lambda: has("{{8, 0}, {14, 30}, {16, 40}}", _brief)
+          and has("16:30 那次采集", _brief))
+    check("⭐ 过了点不补（简报的时段含义绑着时间）",
+          lambda: has("过了点就今天补一条", _brief) and has("CATCHUP_WINDOW_MS", _brief))
+    check("⭐ 开机补发有窄窗口（不是一整天都能补）",
+          lambda: has("90L * 60 * 1000", _brief))
+    check("⭐ 日期串走本地时区（UTC 会让凌晨 0-8 点的「今天」变成昨天）",
+          lambda: has("Locale.US", _brief) and has("Calendar.getInstance()", _brief))
+
+    # ---------------------------------------------------------- 响的时候
+    check("⭐ 接收器用 goAsync()（onReceive 只有 10 秒，联网会被杀）",
+          lambda: has("goAsync()", _brecv) and has("pending.finish()", _brief))
+    check("⭐ 先提醒、再重排（反了就再也回不到这一次）",
+          lambda: _brief.index("fire(app, s, false);") < _brief.index("reschedule(app);"))
+    check("⭐ 取不到内容也要发一条，而且要明说取不到（零条 = 用户以为坏了）",
+          lambda: has("简报暂时拿不到", _brief) and has("服务器或网络没应答", _brief))
+    check("⭐ 发不出去就不记「已发」（等权限开回来还能补）",
+          lambda: has('return "nonotify"', _brief)
+          and _brief.index('return "nonotify"') < _brief.index("markSent(ctx, slot)"))
+    check("⭐ 手动测试不记「已发」（否则当天那条真的会被自己顶掉）",
+          lambda: has("if (!test) {", _brief) and has("boolean test", _brief))
+    check("⭐ 每个时段每天只发一次（已发记录挡着）",
+          lambda: has("alreadySent(ctx, slot)", _brief) and has("KEY_SENT", _brief))
+    check("简报接收器也收开机广播（闹钟不跨重启存活）",
+          lambda: has("Intent.ACTION_BOOT_COMPLETED", _brecv)
+          and has("BriefAlarm.catchUp(ctx, goAsync())", _brecv))
+    # ⚠️ 补发这条路**必须**在后台线程里联网。BOOT_COMPLETED 的 onReceive 是主线程，
+    #    同步调 fetch 会被判成 NetworkOnMainThreadException —— 被兜底 catch 吞掉，
+    #    通知照样弹，只是每条都写着"服务器或网络没应答"。不崩、不报错、内容是错的。
+    check("⭐ 开机补发不在主线程联网（否则每条补发都变成「拿不到」）",
+          lambda: has("static void catchUp(final Context ctx, "
+                      "final BroadcastReceiver.PendingResult pending)", _brief)
+          and has("catchUpNow(app)", _brief)
+          and eq("catchUpNow(ctx)" in _brecv, False))
+    check("⭐ 补发的重排是同步先做的（闹钟还在不在，比今天补不补重要）",
+          lambda: _brief.index("reschedule(app);", _brief.index("static void catchUp("))
+          < _brief.index("new Thread(", _brief.index("static void catchUp(")))
+    check("覆盖安装/改时间/换时区/权限授予都会重排",
+          lambda: has("ACTION_MY_PACKAGE_REPLACED", _brecv)
+          and has("ACTION_TIME_CHANGED", _brecv)
+          and has("ACTION_TIMEZONE_CHANGED", _brecv)
+          and has("SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED", _brecv))
+
+    # ---------------------------------------------------------- 清单
+    check("清单里注册了 BriefAlarmReceiver", lambda: has(".BriefAlarmReceiver", _mani2))
+    # ⚠️ exported 必须 true：false 时 targetSdk 31+ 有大量实例收不到 BOOT_COMPLETED，
+    #    而收不到的后果是静默的（重启后简报永久不响）。
+    _recv_seg = _mani2[_mani2.index(".BriefAlarmReceiver") - 60:]
+    _recv_seg = _recv_seg[:_recv_seg.index("</receiver>")]
+    check("⭐ 接收器 exported=true（否则可能收不到开机广播，且不报错）",
+          lambda: has('android:exported="true"', _recv_seg))
+    check("接收器声明了 BOOT_COMPLETED",
+          lambda: has("BOOT_COMPLETED", _recv_seg))
+    check("POST_NOTIFICATIONS / RECEIVE_BOOT_COMPLETED / SCHEDULE_EXACT_ALARM 都在",
+          lambda: has("POST_NOTIFICATIONS", _mani2)
+          and has("RECEIVE_BOOT_COMPLETED", _mani2)
+          and has("SCHEDULE_EXACT_ALARM", _mani2))
+
+    # ---------------------------------------------------------- 取内容
+    check("简报接口常量在 AppConfig 里（口令构建期注入，不进仓库）",
+          lambda: has("API_BRIEF = BASE_URL + \"/api/brief\"", _cfg2))
+    # ⚠️ 路径上已经有 ?slot=xxx 了，再拼一个 ?t= 会让服务器把 slot 读成
+    #    "close?t=..."。这种错看着像网络问题，其实只是少了一个 &。
+    check("⭐ 已经有 query 的路径用 &t= 而不是 ?t=（少一个 & 就会静默取错时段）",
+          lambda: has('AUTH_QUERY = "&t=" + TOKEN', _cfg2)
+          and has("AppConfig.AUTH_QUERY", _brief))
+    check("接口带口令（HttpURLConnection 不共享 WebView 的 Cookie）",
+          lambda: has("Accept", _brief) and has("application/json", _brief))
+    check("⭐ 网络有硬预算（onReceive 只给约 10 秒，超了就被杀，表现是「偶尔不响」）",
+          lambda: has("CONNECT_TIMEOUT = 5000", _brief)
+          and has("READ_TIMEOUT = 7000", _brief))
+    check("取内容失败返回 null，不抛", lambda: has("return null;", _brief))
+
+    # ---------------------------------------------------------- 配置
+    check("配置存 SharedPreferences（不入库、不上传）",
+          lambda: has('KEY_CONF = "brief_json"', _brief))
+    check("⭐ 写配置用 commit()（apply() 拿不到真实结果，等于骗网页「已保存」）",
+          lambda: has(".commit()", _brief))
+    # ⚠️ 坏输入不许落盘：写了坏配置之后每次读都退回默认，
+    #    用户会发现"刚设的时刻莫名其妙变回去了"。
+    check("⭐ 落盘前先解析一遍，坏 JSON 直接拒收",
+          lambda: has("new JSONObject(json)", _brief))
+    check("⭐ 读配置逐字段校验时刻（0-23 / 0-59），坏的退回默认",
+          lambda: has("if (h < 0 || h > 23 || m < 0 || m > 59)", _brief))
+    check("解析不了就整体退回默认，不半信半疑地读",
+          lambda: has("整体退回默认", _brief))
+    check("⭐ 排程失败一律吞掉（排不上最坏是不提醒，抛出去就是开 App 崩）",
+          lambda: has("catch (Exception ignored)", _brief))
+
+    # ---------------------------------------------------------- 桥与网页
+    check("桥有 briefInfo", lambda: has("public String briefInfo()", _main2))
+    check("桥有 setBrief", lambda: has("public boolean setBrief(String json)", _main2))
+    check("桥有 testBrief", lambda: has("public String testBrief(String slot)", _main2))
+    check("⭐ 写配置顺手重排（写只有这一条路径，挂这儿就不可能「忘了排」）",
+          lambda: has("reschedule(this);", _main2)
+          and has("reschedule(ctx);", _brief))
+    check("开 App 时也重排一次简报", lambda: has("BriefAlarm.reschedule(this);", _main2))
+    check("测试按钮同步返回结果码（异步就说不清通没通）",
+          lambda: has("String testBrief(String slot)", _main2)
+          and has("同步**执行", _main2))
+    for _code in ("ok", "nonotify", "nofetch", "dup"):
+        check(f"结果码 {_code} 在原生侧给出来了", lambda c=_code: has(f'"{c}"', _brief))
+    for _code2 in ("nonotify", "dup"):
+        check(f"网页认结果码 {_code2}", lambda c=_code2: has(f'"{c}"', _js4))
+
+    check("网页用 bridge 的三个方法",
+          lambda: has("native.briefInfo()", _js4) and has("native.setBrief(", _js4)
+          and has("native.testBrief(", _js4))
+    check("⭐ 三行只画一次（重画会把正在输入的时刻打断）",
+          lambda: has("briefBuilt", _js4))
+    # 三行是动态生成的：直接往上挂监听，重画一次就全丢了
+    check("⭐ 事件委托挂在容器上（动态生成的行不能直接挂监听）",
+          lambda: has('briefRows.addEventListener("change"', _js4))
+    check("⭐ 存住之后从原生重读，不拿 DOM 的值自己回显",
+          lambda: has("say(\"已保存\", \"is-ok\")", _js4) and has("paintBrief();", _js4))
+    check("⭐ 时刻框清空时不许当成 0:00（那会变成半夜弹一条）",
+          lambda: has("时刻填得不对", _js4) and has("isFinite(h)", _js4))
+    check("取简报时按钮要禁用 + 给一句话（有网络耗时，不能像点了没反应）",
+          lambda: has("briefTest.disabled = true", _js4))
+    check("旧壳没有 briefInfo 时说清是旧壳，不指错地方",
+          lambda: has("这台 App 还是旧版本，没有每日简报能力", _js4))
+    check("设置页有 #set-brief", lambda: has('id="set-brief"', _set3))
+    check("⭐ 简报区块也在 #set-native 里（浏览器里不显示点了没用的开关）",
+          lambda: _set3.index('id="set-native"') < _set3.index('id="set-brief"'))
+    check("⭐ 简报区块是空壳：模板里不注入任何值",
+          lambda: eq("{{" in _set3[_set3.index('id="set-brief"'):
+                                  _set3.index('id="set-perm-panel"')], False))
+    for _id2 in ("brief-rows", "brief-test", "brief-msg", "brief-perm", "brief-exact"):
+        check(f"设置页含 #{_id2}", lambda i=_id2: has(f'id="{i}"', _set3))
+    check("样式给时刻框上色（表单控件不继承文字颜色）",
+          lambda: has(".brief-time {", _css4) and has("color: var(--text)", _css4))
+    check("⭐ 时刻框字号 16px（低于它手机会自动放大整页）",
+          lambda: has("font-size: 16px", _css4))
+    check("关掉的时段整行压暗", lambda: has(".brief-row.is-off", _css4))
+
+    # ---------------------------------------------------------- 产物
+    if _prod_set.is_file():
+        _ps = _prod_set.read_text(encoding="utf-8")
+        check("产物设置页含简报区块", lambda: has('id="set-brief"', _ps))
+        check("产物设置页含简报时刻容器", lambda: has('id="brief-rows"', _ps))
+    check("产物脚本含 briefInfo", lambda: has(
+        "native.briefInfo()",
+        (ROOT / "public/static/app.js").read_text(encoding="utf-8")))
+    check("产物样式含简报行", lambda: has(
+        ".brief-row {",
+        (ROOT / "public/static/style.css").read_text(encoding="utf-8")))
+
+    # ---------------------------------------------------------- 文档
+    _readme4 = (ROOT / "README.md").read_text(encoding="utf-8")
+    check("README 记录了每日简报提醒", lambda: has("每日简报", _readme4))
+except Exception as exc:  # noqa: BLE001
+    import traceback
+    print("  [!!] 简报检查抛异常：")
+    print(traceback.format_exc())
+    FAILED.append("brief")
 
 print("\n" + "=" * 52)
 if FAILED:

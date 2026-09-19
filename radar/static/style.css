@@ -2702,3 +2702,55 @@ body.plans-open { overflow: hidden; }
   /* 手机上 4 列会挤成"每格两个字"，改成 2×2 */
   .wl-hero { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+
+/* =========================================================================
+   每日简报（设置页 / App 内）
+   -------------------------------------------------------------------------
+   三行 = 三个时段。每行左边是"开关 + 时段名 + 下一次什么时候响"，
+   右边是时刻输入框。
+
+   ⚠️ 时刻用的 `<input type="time">` 必须自己上色：表单控件**不继承**文字颜色，
+   各 ROM 的 WebView 默认值不同（有的在深色主题下是黑字黑底，直接看不见）。
+   ⚠️ 字号必须 >= 16px：手机上小于它就触发"聚焦时自动放大整页"，
+   表现为"点一下时间框，页面跳了一下"。
+   ========================================================================= */
+
+.brief-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding: var(--sp-3) 0;
+  border-bottom: 1px dashed var(--border);
+}
+.brief-row:last-of-type { border-bottom: 0; }
+.brief-row .set-label { flex: 1 1 auto; min-width: 0; }
+
+.brief-time {
+  flex: none;
+  width: 108px;
+  padding: 7px 9px;
+  font-size: 16px;                       /* 低于 16px 手机会自动放大页面 */
+  font-family: var(--font-mono);
+  color: var(--text);
+  background: var(--surface-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  transition: border-color var(--dur) var(--ease-out), box-shadow var(--dur) var(--ease-out);
+}
+.brief-time:focus {
+  outline: none;
+  border-color: var(--brand);
+  box-shadow: 0 0 0 3px var(--brand-glow);
+}
+/* 关掉的时段：整行压暗，让人一眼看出"这档不会响" */
+.brief-row.is-off .set-label,
+.brief-row.is-off .brief-time { opacity: .5; }
+
+.brief-when { font-size: var(--fs-xs); color: var(--text-faint); }
+
+@media (max-width: 400px) {
+  /* 极窄屏：时刻框独占一行，否则"下一次 9月20日 08:00"会被压成两行乱码 */
+  .brief-row { flex-wrap: wrap; }
+  .brief-time { width: 100%; }
+}

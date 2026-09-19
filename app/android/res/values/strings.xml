@@ -54,4 +54,14 @@
     <string name="notify_test_failed">发不出来 —— 检查一下通知权限</string>
     <string name="notify_already">通知权限本来就是开的</string>
     <string name="notify_no_autostart_page">这台手机没有自启动设置页，去应用详情里找「自启动 / 后台运行」</string>
+
+    <!-- 每日简报（系统通知）。
+         为什么单开一个**渠道**，而不是和规划提醒共用一个：
+           ① 系统设置里按渠道单独静音 —— 有人只想要每天的大盘简报、不想要
+              待办式的规划提醒（或者反过来）。共用渠道的话这两件事
+              永远只能一起开、一起关，用户就没得选。
+           ② 渠道名要诚实。把简报塞进叫「规划提醒」的渠道里，
+              用户去系统设置里根本找不到"简报"这两个字。 -->
+    <string name="notify_brief_channel">每日简报</string>
+    <string name="notify_brief_channel_desc">早间 / 尾盘 / 收盘各一条大盘简报</string>
 </resources>

@@ -46,6 +46,16 @@ final class Notifier {
     static final String CHANNEL_ID = "radar_plans";
 
     /**
+     * 每日简报**单独的渠道**。
+     *
+     * 为什么不共用 CHANNEL_ID：系统设置里是按渠道静音的 —— 有人只想要每天
+     * 的大盘简报、不想要待办式的规划提醒（或者反过来）。共用渠道的话这两件事
+     * 只能一起开、一起关。另外渠道名也要诚实：简报塞进叫「规划提醒」的渠道里，
+     * 用户去系统设置根本找不到"简报"两个字。
+     */
+    static final String CHANNEL_BRIEF_ID = "radar_brief";
+
+    /**
      * 到期提醒的固定通知 id。
      *
      * ⭐ 用**固定值**而不是每条规划一个：同一天到期的几条合成一条通知
@@ -57,7 +67,21 @@ final class Notifier {
     /** 测试提醒用另一个 id：它和真正的到期提醒互不覆盖。 */
     private static final int ID_TEST = 4102;
 
+    /**
+     * 每日简报的通知 id。**一个时段一个**，从 {@link BriefAlarm#ID_BRIEF_BASE} 起算。
+     *
+     * ⚠️ 这里必须按时段分开，不能像到期提醒那样共用一个固定 id：
+     *    到期提醒是"某一天"的一件事（所以一天一条），而简报一天三条、
+     *    每条的内容都不一样 —— 共用一个 id 的话，16:40 的收盘简报会把
+     *    早上那条还没看的早间简报**直接顶掉**，用户永远看不到。
+     */
+    static final int ID_BRIEF_BASE = 4201;
+
+    /** 简报的"发一条看看"用另一个 id，免得把当天真该留着的那条覆盖了。 */
+    static final int ID_BRIEF_TEST = 4210;
+
     private static final int REQ_TAP = 102;
+    private static final int REQ_TAP_BRIEF = 103;
 
     private Notifier() {
     }
@@ -104,6 +128,17 @@ final class Notifier {
 
     /** 建通知渠道。API 26 之前没有渠道这个概念，直接返回。 */
     static void ensureChannel(Context ctx) {
+        ensureChannel(ctx, CHANNEL_ID, R.string.notify_channel,
+                R.string.notify_channel_desc);
+    }
+
+    /** 建每日简报的渠道。 */
+    static void ensureBriefChannel(Context ctx) {
+        ensureChannel(ctx, CHANNEL_BRIEF_ID, R.string.notify_brief_channel,
+                R.string.notify_brief_channel_desc);
+    }
+
+    private static void ensureChannel(Context ctx, String id, int nameRes, int descRes) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
             return;
         }
@@ -112,14 +147,14 @@ final class Notifier {
             return;
         }
         try {
-            if (nm.getNotificationChannel(CHANNEL_ID) != null) {
+            if (nm.getNotificationChannel(id) != null) {
                 return;          // 已存在：不重建，免得和用户的调整打架
             }
             NotificationChannel ch = new NotificationChannel(
-                    CHANNEL_ID,
-                    ctx.getString(R.string.notify_channel),
+                    id,
+                    ctx.getString(nameRes),
                     NotificationManager.IMPORTANCE_HIGH);
-            ch.setDescription(ctx.getString(R.string.notify_channel_desc));
+            ch.setDescription(ctx.getString(descRes));
             ch.enableVibration(true);
             ch.setVibrationPattern(new long[]{0, 180, 120, 180});
             Uri sound = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION);
@@ -146,30 +181,48 @@ final class Notifier {
      *         这样等用户把权限开回来，下一次还有机会补上。
      */
     static boolean notifyDue(Context ctx, String title, String text, String bigText) {
-        return post(ctx, ID_DUE, title, text, bigText);
+        return post(ctx, CHANNEL_ID, ID_DUE, title, text, bigText, tapIntent(ctx));
     }
 
     /** 设置页的"测试提醒"：立刻发一条，内容和到期提醒长得一样。 */
     static boolean notifyTest(Context ctx) {
         return post(ctx,
+                CHANNEL_ID,
                 ID_TEST,
                 ctx.getString(R.string.notify_test_title),
                 ctx.getString(R.string.notify_test_text),
-                ctx.getString(R.string.notify_test_big));
+                ctx.getString(R.string.notify_test_big),
+                tapIntent(ctx));
     }
 
-    private static boolean post(Context ctx, int id, String title, String text,
-                                String bigText) {
+    /**
+     * 发一条每日简报。
+     *
+     * 点它的落点**不是**规划面板（那是到期提醒的语义），而是直接进 App ——
+     * 简报要连网才拿得到，点进来看到的还是那个 WebView，没必要多一个"掀面板"的动作。
+     */
+    static boolean notifyBrief(Context ctx, int id, String title, String text,
+                               String bigText) {
+        return post(ctx, CHANNEL_BRIEF_ID, id, title, text, bigText,
+                briefTapIntent(ctx));
+    }
+
+    private static boolean post(Context ctx, String channelId, int id, String title,
+                                String text, String bigText, PendingIntent tap) {
         if (!canNotify(ctx)) {
             return false;               // 没权限就别往下走，调用方会看到 false
         }
-        ensureChannel(ctx);
+        if (CHANNEL_BRIEF_ID.equals(channelId)) {
+            ensureBriefChannel(ctx);
+        } else {
+            ensureChannel(ctx);
+        }
         NotificationManager nm = manager(ctx);
         if (nm == null) {
             return false;
         }
         try {
-            nm.notify(id, build(ctx, title, text, bigText));
+            nm.notify(id, build(ctx, channelId, title, text, bigText, tap));
             return true;
         } catch (Exception e) {
             return false;
@@ -177,10 +230,11 @@ final class Notifier {
     }
 
     @SuppressWarnings("deprecation")
-    private static Notification build(Context ctx, String title, String text, String bigText) {
+    private static Notification build(Context ctx, String channelId, String title,
+                                      String text, String bigText, PendingIntent tap) {
         Notification.Builder b;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            b = new Notification.Builder(ctx, CHANNEL_ID);
+            b = new Notification.Builder(ctx, channelId);
         } else {
             // API 24/25：没有渠道，声音/震动得挂在这一条上
             b = new Notification.Builder(ctx);
@@ -194,7 +248,7 @@ final class Notifier {
                 .setAutoCancel(true)
                 .setWhen(System.currentTimeMillis())
                 .setShowWhen(true)
-                .setContentIntent(tapIntent(ctx));
+                .setContentIntent(tap);
 
         if (bigText != null && bigText.length() > 0) {
             // 折叠态一行放不下时，展开能看到完整清单
@@ -220,6 +274,23 @@ final class Notifier {
         it.putExtra(PlanReminder.EXTRA_OPEN_PLANS, true);
         it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
         return PendingIntent.getActivity(ctx, REQ_TAP, it,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+    }
+
+    /**
+     * 点每日简报的落点：**只**打开 App，不带"掀开规划面板"那个 extra。
+     *
+     * ⚠️ 用不同的 requestCode（REQ_TAP_BRIEF）：PendingIntent 的身份是
+     *    (requestCode, Intent 的 action/data/component…) 一起算的，
+     *    两个语义不同的跳转共用一个 requestCode 会互相覆盖，表现为
+     *    "点简报却掀开了规划面板"这种莫名其妙的行为。
+     */
+    private static PendingIntent briefTapIntent(Context ctx) {
+        Intent it = new Intent(ctx, MainActivity.class);
+        it.setAction(Intent.ACTION_MAIN);
+        it.addCategory(Intent.CATEGORY_LAUNCHER);
+        it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        return PendingIntent.getActivity(ctx, REQ_TAP_BRIEF, it,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
     }
 

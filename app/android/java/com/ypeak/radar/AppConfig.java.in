@@ -55,6 +55,25 @@ final class AppConfig {
     /** 给下载拼鉴权参数用。 */
     static final String TOKEN_QUERY = "?t=" + TOKEN;
 
+    /**
+     * 路径上**已经有** query 时用这个接在尾巴上。
+     *
+     * 为什么需要两个：`TOKEN_QUERY` 是 `?t=`，只能接在裸路径后面。
+     * 简报接口自己要带 `?slot=xxx`，再拼一个 `?t=` 就成了
+     * `/api/brief?slot=close?t=...` —— 服务器会把 `slot` 读成 `close?t=...`，
+     * 表现是"参数不合法"（或者更糟：悄悄用了默认值，拿到的时段不对）。
+     * 这种错看着像网络问题，其实只是少了 `&`。
+     */
+    static final String AUTH_QUERY = "&t=" + TOKEN;
+
+    /**
+     * 每日简报接口。闹钟响的时候原生去取一次（内容在服务器上，不在本地）。
+     *
+     * 带上 `t=` 的理由和 API_APP 一样：HttpURLConnection 不共享 WebView 的
+     * CookieJar，不带口令就是 401。
+     */
+    static final String API_BRIEF = BASE_URL + "/api/brief";
+
     /** 本体的版本。和服务器返回的 versionCode 比大小。 */
     static final int VERSION_CODE = __RADAR_VERSION_CODE__;
     static final String VERSION_NAME = "__RADAR_VERSION_NAME__";

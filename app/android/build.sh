@@ -226,7 +226,8 @@ done
 # ⚠️ 新增类时**必须**同步加到这个列表里。PlanAlarmReceiver 是"被 manifest
 #    引用"的类型 —— 漏拷它的话 javac 根本不会报错（没人 new 它），
 #    编译一路通过，装到手机上才发现开机/到点时接收器不存在。
-for cls in MainActivity ApkProvider Notifier PlanReminder PlanAlarmReceiver; do
+for cls in MainActivity ApkProvider Notifier PlanReminder PlanAlarmReceiver \
+           BriefAlarm BriefAlarmReceiver; do
     [ -f "$BU/java/com/ypeak/radar/$cls.java" ] \
         || { echo "✗ 构建目录里缺 $cls.java（新增类时忘了拷？）" >&2; exit 1; }
 done
