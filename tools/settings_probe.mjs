@@ -132,6 +132,28 @@ const STUB = `(() => {
   };
 })();`;
 
+/* ---------------- 给 STUB **补上**提醒能力 ----------------
+   刻意做成"补丁"而不是另写一份完整桥：设置页探针的前半段就是要验
+   **没有提醒能力的旧壳**（用户手机上先看到新页面的那个状态），
+   所以两种壳必须在同一次运行里都走一遍。
+
+   状态从 window.__remind 读，可在页面里用 window.__setRemind() 改 ——
+   于是"原生喊一声 → 页面重画"这条链是真的被验证过，而不是只看代码。 */
+const STUB_REMIND = `(() => {
+  if (!window.RadarNative) return;
+  window.__remind = { notify: false, exact: false, pending: true,
+                      when: "", count: 0, titles: "" };
+  window.__setRemind = (o) => { Object.assign(window.__remind, o); };
+  Object.assign(window.RadarNative, {
+    reminderInfo: () => JSON.stringify(window.__remind),
+    requestNotify: () => window.__calls.push("requestNotify"),
+    openExactAlarmSettings: () => window.__calls.push("openExactAlarmSettings"),
+    autoStartVendor: () => "小米",
+    openAutoStartSettings: () => window.__calls.push("openAutoStartSettings"),
+    testNotify: () => { window.__calls.push("testNotify"); return true; }
+  });
+})();`;
+
 /* ---------------- 页面内取值：一律自包含，返回基本类型 ---------------- */
 const snap = `(() => {
   const t = (id) => { const e = document.getElementById(id); return e ? e.textContent : null; };
@@ -253,8 +275,99 @@ const snap = `(() => {
     typeof s.env === "string" && s.env.indexOf("浏览器") !== -1, s.env);
   check("提示带警告态", s.envWarn);
 
-  // =============================================================== C. 无异常
-  console.log("\n== C. 页面无 JS 异常 ==");
+  // =============================================================== C. 规划提醒
+  //
+  // 两种壳都要验：
+  //   · **旧壳**（桥上没有提醒那几个方法）—— 就是用户手机上还会装的 v1.6。
+  //     页面先更新、App 后更新，这个状态**必然会出现**，而且最容易被写成
+  //     "拿不到信息 → 当成没权限"，把一个跟问题无关的引导摆到用户面前。
+  //   · 新壳 —— 状态行、按钮、以及原生喊一声就重画（RadarReminderRefresh）。
+  console.log("\n== C. 规划提醒 ==");
+
+  const snapRemind = `(() => {
+    const t = (id) => { const e = document.getElementById(id); return e ? e.textContent : null; };
+    const el = (id) => document.getElementById(id);
+    const vis = (id) => !!el(id) && !el(id).hidden;
+    return {
+      next: t("rem-next"), notify: t("rem-notify"), exact: t("rem-exact"),
+      msg: t("rem-msg"), setMsg: t("set-msg"),
+      permShown: vis("rem-perm"), exactShown: vis("rem-exact-btn"),
+      bootShown: vis("rem-boot"), testShown: vis("rem-test"),
+      calls: (window.__calls || []).slice()
+    };
+  })()`;
+
+  // ---- C1. 旧壳：拿不到提醒信息
+  await send("Page.addScriptToEvaluateOnNewDocument", { source: STUB });
+  await goto("/settings/?pass=c1");
+  let r = await evalJs(snapRemind);
+  check("旧壳：明说 App 是旧版本，而不是按「没权限」误报",
+    typeof r.msg === "string" && r.msg.indexOf("旧版本") !== -1, r.msg);
+  check("旧壳：说清了更新之后就有", r.msg.indexOf("更新") !== -1, r.msg);
+  check("旧壳：不摆点了没用的按钮",
+    !r.permShown && !r.exactShown && !r.bootShown && !r.testShown);
+  check("旧壳：三个状态位显示为未知（—），不编数字",
+    r.next === "—" && r.notify === "—" && r.exact === "—", [r.next, r.notify, r.exact]);
+
+  // ---- C2. 有提醒能力的壳
+  const inj3 = await send("Page.addScriptToEvaluateOnNewDocument", { source: STUB_REMIND });
+  await goto("/settings/?pass=c2");
+  r = await evalJs(snapRemind);
+  check("下一次：没排到时说「暂时没有安排」（而不是留个空白）",
+    r.next === "暂时没有安排", r.next);
+  check("通知权限如实显示未开启", r.notify === "未开启", r.notify);
+  check("准点提醒如实显示未开启", r.exact === "未开启", r.exact);
+  check("没通知权限 → 摆出开启按钮", r.permShown);
+  check("没准点权限 → 摆出准点按钮", r.exactShown);
+  check("小米这类系统 → 摆出自启动引导", r.bootShown);
+  check("说明里点出「通知权限没开」", r.msg.indexOf("通知权限") !== -1, r.msg);
+
+  await evalJs(`document.getElementById("rem-perm").click()`);
+  await sleep(200);
+  r = await evalJs(snapRemind);
+  check("点「开启通知权限」→ 调了 requestNotify",
+    r.calls.indexOf("requestNotify") !== -1, r.calls);
+
+  await evalJs(`document.getElementById("rem-exact-btn").click()`);
+  await sleep(150);
+  await evalJs(`document.getElementById("rem-boot").click()`);
+  await sleep(150);
+  r = await evalJs(snapRemind);
+  check("点「开启准点提醒」→ 调了 openExactAlarmSettings",
+    r.calls.indexOf("openExactAlarmSettings") !== -1, r.calls);
+  check("点「去设置自启动」→ 调了 openAutoStartSettings",
+    r.calls.indexOf("openAutoStartSettings") !== -1, r.calls);
+
+  // ---- 测试提醒：一按就要有明确结果（不能只靠"弹没弹"判断）
+  await evalJs(`document.getElementById("rem-test").click()`);
+  await sleep(250);
+  r = await evalJs(snapRemind);
+  check("点「发一条测试提醒」→ 调了 testNotify",
+    r.calls.indexOf("testNotify") !== -1, r.calls);
+  check("并且给了一句明确的反馈",
+    typeof r.setMsg === "string" && r.setMsg.indexOf("测试提醒") !== -1, r.setMsg);
+
+  // ---- ⭐ 原生从系统设置页回来时会喊的那一声：window.RadarReminderRefresh()
+  //      设置页必须**重新去读**原生，而不是把旧状态留在屏幕上。
+  await evalJs(`
+    window.__setRemind({ notify: true, exact: true, pending: true,
+                         when: "10月1日 09:00", count: 2, titles: "A、B" });
+    window.RadarReminderRefresh();
+  `);
+  await sleep(200);
+  r = await evalJs(snapRemind);
+  check("⭐ 原生喊一声后，状态行重画（下一次 + 条数）",
+    r.next === "10月1日 09:00（2 条）", r.next);
+  check("权限齐备后两个按钮都收起", !r.permShown && !r.exactShown);
+  check("准点权限也有了 → 说明里不再提「可能晚一会儿」",
+    r.msg.indexOf("晚一会儿") === -1, r.msg);
+  check("仍然如实提示自启动这件事（那是系统层面的限制）",
+    r.msg.indexOf("自启动") !== -1, r.msg);
+
+  await send("Page.removeScriptToEvaluateOnNewDocument", { identifier: inj3.identifier });
+
+  // =============================================================== D. 无异常
+  console.log("\n== D. 页面无 JS 异常 ==");
   check("全程没有未捕获异常", pageErrors.length === 0,
     pageErrors.length ? pageErrors.slice(0, 3) : undefined);
 

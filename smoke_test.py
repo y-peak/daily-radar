@@ -6,6 +6,7 @@
 """
 import importlib.util
 import py_compile
+import re
 import sys
 from pathlib import Path
 
@@ -1752,25 +1753,35 @@ try:
     check(f"build.sh 点名校验覆盖全部手写类 {_handwritten}",
           lambda: all(has(cls, _build) for cls in _handwritten))
 
-    # ⚠️⚠️ 构建脚本里不能出现**目录级 rm -rf** —— 实测会被批量删除防护
-    #    拦下（SAFE_DELETE_BULK_CONFIRM_REQUIRED），整条构建链直接断掉、
-    #    一个 APK 都出不来。只清本轮的编译产物 + 按文件名清 dist。
+    # ⚠️⚠️ 构建脚本里的删除动作现在**一个都不允许有**，不只是"别整目录删"。
     #
-    # ⚠️ 这里必须**先剥掉注释**再断言"某字符串不该出现"：
-    #    上面那两行说明里就写着 `rm -rf "$BU"`，直接搜正文会永远命中。
+    #    起因：批量删除防护是**按轮次累计**的（单次上限 50）。同一轮里构建两次，
+    #    第二次连 `rm -rf "$BU/classes"`（几十份 .class）都会被拦下，
+    #    而拦住的表现是脚本静默中止、一个 APK 都出不来 —— 报错信息看起来
+    #    跟安卓、跟代码都毫无关系。构建脚本被一条外部策略弄成"这个回合不能用"，
+    #    是把风险转嫁给了"下次想发版的人"。
+    #
+    #    不删的代价是构建目录会留着上一次的产物，所以**必须**配两道陈旧产物守卫
+    #    （陈旧资源 / 陈旧 .class），把它变成一次看得见的失败 ——
+    #    否则就是"编译一声不响、手机上那个类其实还在"。
+    #
+    # ⚠️ 这里必须先剥掉注释再断言"某字符串不该出现"：
+    #    上面这些说明里就写着 `rm -rf`，直接搜正文会永远命中。
     #    （顺带记一个坑：不能写成 `not has(...)` —— has() 找不到时是**抛异常**、
     #     不是返回 False，所以 `not has(x)` 的意思恰好反过来：它要求 x 必须存在。
     #     要断"不存在"就用 `x in code` 配 eq 定成 False。）
     _build_code = "\n".join(
         ln for ln in _build.splitlines() if not ln.lstrip().startswith("#"))
-    check("⭐ build.sh 不整目录 rm -rf 构建目录",
-          lambda: eq('rm -rf "$BU"' in _build_code, False))
-    check("⭐ build.sh 不整目录 rm -rf dist",
-          lambda: eq('rm -rf "$HERE/dist"' in _build_code, False))
+    check("⭐ build.sh 里没有任何删除动作（一条都不行）",
+          lambda: eq([ln.strip() for ln in _build_code.splitlines()
+                      if "rm -rf" in ln or "rm -f" in ln
+                      or ln.strip().startswith("rm ")], []))
+    check("⭐ 改用陈旧资源守卫（仓库里已删的资源不许编进去）",
+          lambda: has("_stale_res", _build_code))
+    check("⭐ 改用陈旧 .class 守卫（没有源码的类不许打进 dex）",
+          lambda: has("_stale_cls", _build_code))
     check("build.sh 不再写死拷单个类",
           lambda: eq("java/com/ypeak/radar/MainActivity.java" in _build_code, False))
-    check("build.sh 按文件名清 dist",
-          lambda: has('rm -f "$HERE/dist"/radar-*.apk', _build))
 
     # --- 5. 版本前进（写侧）—— 否则线上"最新版"会被更旧的包顶掉 ---
     check("build.sh 版本自动递增", lambda: has("LAST_CODE + 1", _build))
@@ -1982,9 +1993,17 @@ try:
     check("设置区默认隐藏", lambda: has('id="set-native" hidden', _set_tpl))
     check("浏览器提示块默认隐藏", lambda: has('id="set-web-only" hidden', _set_tpl))
 
-    # 设置项不该被"点标题折叠"误伤（点了标题把开关收起来，像功能消失）
-    check("设置卡片豁免折叠",
-          lambda: eq(_set_tpl.count("data-no-collapse"), 5))
+    # 设置项不该被"点标题折叠"误伤（点了标题把开关收起来，像功能消失；
+    # 而设置卡片全都是一行一行的开关，被折起来就等于这个功能不存在了）。
+    #
+    # ⚠️ 这里刻意**不写死卡片数量**。写死的话，加一个设置卡片就红一片，
+    #    而"加卡片"本身是完全正常的改动 —— 那种断言只会训练人忽略失败。
+    #    改成从文件里现算：**每一个** panel 都必须带豁免属性。
+    _set_panels = re.findall(r"<section[^>]*class=\"[^\"]*\bpanel\b[^\"]*\"[^>]*>", _set_tpl)
+    check(f"设置页 {len(_set_panels)} 个卡片全部豁免折叠（至少 5 个）",
+          lambda: eq(len(_set_panels) >= 5, True))
+    check("没有一个卡片漏了豁免属性",
+          lambda: eq([s for s in _set_panels if "data-no-collapse" not in s], []))
     check("折叠逻辑尊重豁免属性",
           lambda: has('p.hasAttribute("data-no-collapse")', _js_src))
 
@@ -2181,6 +2200,255 @@ except Exception as exc:  # noqa: BLE001
     print("  [!!] 规划面板检查抛异常：")
     print(traceback.format_exc())
     FAILED.append("plans")
+
+# ==================================================== 17. 规划到期提醒（系统通知）
+# 这条链路**整条都在原生侧**，浏览器里跑不到 —— 所以它是本项目里最需要
+# 静态断言守住的地方：写错了不会有任何运行时提示，只会在某一天用户发现
+# “我明明设了提醒，却从来没被提醒过”。
+#
+# 五类静默失效，逐条守住：
+#   ① 闹钟排了但重启后没了（AlarmManager 不跨重启）→ 必须有 BOOT_COMPLETED 重排
+#   ② Android 14 起默认不给「闹钟与提醒」权限，setExact* 直接抛 SecurityException
+#      → 必须先 canScheduleExactAlarms()，拿不到就退化成不精确闹钟
+#   ③ 渠道 importance 不是 HIGH → 不会顶上弹出来，跟用户要的效果不是一回事
+#   ④ 桥方法名 / JS 钩子名两边对不上 → 编译期和运行期都不报错，只是点了没反应
+#   ⑤ 用宽容的日期解析 → 把日期理解错，表现是“某天莫名响了 / 该响时没响”
+print("\n== 17. 规划到期提醒（系统通知）==")
+try:
+    _mani = (ROOT / "app/android/AndroidManifest.xml").read_text(encoding="utf-8")
+    _noti = (ROOT / "app/android/java/com/ypeak/radar/Notifier.java").read_text(encoding="utf-8")
+    _remi = (ROOT / "app/android/java/com/ypeak/radar/PlanReminder.java").read_text(encoding="utf-8")
+    _recv = (ROOT / "app/android/java/com/ypeak/radar/PlanAlarmReceiver.java").read_text(encoding="utf-8")
+    _java = (ROOT / "app/android/java/com/ypeak/radar/MainActivity.java").read_text(encoding="utf-8")
+    _strs = (ROOT / "app/android/res/values/strings.xml").read_text(encoding="utf-8")
+    _build = (ROOT / "app/android/build.sh").read_text(encoding="utf-8")
+    _set2 = (ROOT / "radar/templates/settings.html").read_text(encoding="utf-8")
+    _js3 = (ROOT / "radar/static/app.js").read_text(encoding="utf-8")
+    _base3 = (ROOT / "radar/templates/base.html").read_text(encoding="utf-8")
+    _css3 = (ROOT / "radar/static/style.css").read_text(encoding="utf-8")
+    _probe3 = (ROOT / "tools/plans_probe.mjs").read_text(encoding="utf-8")
+    _readme3 = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    def _no_comment(s):
+        """去掉整行注释。
+
+        ⚠️ “某个东西不该出现”这类反面断言必须**先去注释**再判。
+           本项目踩过这个坑：注释里写了一句解释性的代码片段，就让那条断言
+           恒为假、永远绿 —— 一条永远绿的断言等于没有断言，还占着位置骗人。"""
+        return "\n".join(ln for ln in s.splitlines()
+                         if not ln.strip().startswith(("//", "*", "/*")))
+
+    # ---------------------------------------------------------- 清单：权限与接收器
+    check("声明 POST_NOTIFICATIONS（API 33 起的运行时权限）",
+          lambda: has("android.permission.POST_NOTIFICATIONS", _mani))
+    check("⭐ 声明 RECEIVE_BOOT_COMPLETED（闹钟不跨重启）",
+          lambda: has("android.permission.RECEIVE_BOOT_COMPLETED", _mani))
+    check("声明 SCHEDULE_EXACT_ALARM（拿不到要能降级）",
+          lambda: has("android.permission.SCHEDULE_EXACT_ALARM", _mani))
+    check("注册了 PlanAlarmReceiver",
+          lambda: has('android:name=".PlanAlarmReceiver"', _mani))
+    # ⚠️ Android 12（targetSdk 31）起，带 intent-filter 的组件**必须**显式写
+    #    exported，否则编译/安装直接报错；而写成 false 有可能收不到
+    #    BOOT_COMPLETED —— 那条路的失效是静默的，代价完全不对称。
+    check("⭐ 接收器显式声明 exported（Android 12 起强制写）",
+          lambda: has('android:exported="true"', _mani))
+    for _a in ("android.intent.action.BOOT_COMPLETED",
+               "android.intent.action.MY_PACKAGE_REPLACED",
+               "android.intent.action.TIME_SET",
+               "android.intent.action.TIMEZONE_CHANGED",
+               "android.app.action.SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED"):
+        check(f"接收器监听 {_a.rsplit('.', 1)[-1]}",
+              (lambda a: (lambda: has(f'<action android:name="{a}" />', _mani)))(_a))
+
+    # ---------------------------------------------------------- 通知本身
+    check("建了通知渠道", lambda: has("createNotificationChannel", _noti))
+    check("⭐ 渠道 importance = HIGH（不然不会顶上弹出来）",
+          lambda: has("NotificationManager.IMPORTANCE_HIGH", _noti))
+    check("渠道有声有震动（用户要的是跟微信来消息一样）",
+          lambda: has("enableVibration(true)", _noti) and has("setSound(", _noti))
+    check("API 26 前后两套构造都写了（minSdk 24 兼容）",
+          lambda: has("new Notification.Builder(ctx, CHANNEL_ID)", _noti)
+          and has("new Notification.Builder(ctx)", _noti))
+    check("⭐ PendingIntent 不可变（API 31 起必须声明可变性）",
+          lambda: has("PendingIntent.FLAG_IMMUTABLE", _noti))
+    check("通知能展开看完整清单", lambda: has("BigTextStyle", _noti))
+    check("点通知带上掀开规划面板的标记",
+          lambda: has("putExtra(PlanReminder.EXTRA_OPEN_PLANS, true)", _noti))
+    # ⭐ 通知能不能发有两条路被堵：API 33 的运行时权限，以及任何版本上用户
+    #    都能在系统设置里把通知整个关掉。只查前者 → 在 API 32 上会“以为能发、
+    #    实际发不出去”，又是一次安静失效。
+    check("⭐ 同时查运行时权限与系统通知开关",
+          lambda: has("hasRuntimePermission", _noti)
+          and has("areNotificationsEnabled()", _noti))
+    check("通知文案走资源，不在代码里硬拼",
+          lambda: has('name="notify_channel"', _strs)
+          and has('name="notify_test_big"', _strs))
+
+    # ---------------------------------------------------------- 排程
+    check("⭐ 同一时刻只有一个闹钟（两侧用同一个 requestCode）",
+          lambda: has("REQ_ALARM = ", _remi)
+          and eq(_remi.count("ctx, REQ_ALARM, "), 2))
+    check("用 RTC_WAKEUP（睡着的机器也要叫起来）",
+          lambda: has("AlarmManager.RTC_WAKEUP", _remi))
+    check("按需使用精确闹钟", lambda: has("setExactAndAllowWhileIdle", _remi))
+    check("⭐ 先查 canScheduleExactAlarms()（Android 14 起新装默认不给）",
+          lambda: has("canScheduleExactAlarms()", _remi))
+    check("⭐ 拿不到权限就降级成不精确闹钟，而不是抛异常",
+          lambda: has("setAndAllowWhileIdle", _remi))
+    check("⭐ 兜住 SecurityException（权限刚被撤掉的那一瞬间）",
+          lambda: has("SecurityException", _remi))
+    check("⭐ 日期严格校验（长度 + 分隔符 + 数字）",
+          lambda: has("private static boolean isDay(String s)", _remi)
+          and has("s.length() != 10", _remi)
+          and has("s.charAt(4) != '-'", _remi))
+    check("⭐ 日期不合法就整条不参与提醒（宁可漏一条，不可错一条）",
+          lambda: has("!isDay(due)", _remi))
+    check("⭐ 过了点不补发（免得用户每次开 App 都被迟到的提醒打脸）",
+          lambda: has("if (t <= now)", _remi))
+    check("⭐ 只有开机才补当天错过的（catchUp）",
+          lambda: has("boolean catchUpMissed", _remi) and has("catchUp(ctx)", _remi))
+    check("⭐ 接收器里只有 BOOT_COMPLETED 走补发",
+          lambda: has("Intent.ACTION_BOOT_COMPLETED", _recv)
+          and eq(_recv.count("reschedule(ctx, true)"), 1)
+          and has("reschedule(ctx);", _recv))
+    check("一天最多提醒一次（记已提醒的日子）",
+          lambda: has("markNotified", _remi) and has("isNotified", _remi))
+    check("⭐ 只有真发出去才记“已提醒”（发失败要留着补的机会）",
+          lambda: has("boolean ok = Notifier.notifyDue(", _remi)
+          and has("if (ok) {", _remi))
+    check("⭐ “今天”按本地时区算（UTC 在东八区凌晨会差一天）",
+          lambda: has("Calendar.getInstance()", _remi) and has("Locale.US", _remi))
+    check("排到哪天会落成可读的时间（链路要有参照物）",
+          lambda: has("KEY_NEXT_AT", _remi) and has("KEY_NEXT_DAY", _remi))
+    check("查已存在的 PendingIntent 用 FLAG_NO_CREATE",
+          lambda: has("PendingIntent.FLAG_NO_CREATE", _remi))
+    # 排程只在**写规划**这一条路径上触发，不可能“忘了排”
+    check("⭐ 保存规划时顺手重排（写规划只有这一条路）",
+          lambda: has("PlanReminder.reschedule(MainActivity.this)", _java))
+    # ⚠️ 反面：打开 App **不能**把还没被看过的提醒收掉。
+    #    曾经在 cancel() 里顺手 cancel 过通知，于是用户 9:00 收到提醒、
+    #    9:30 开一下 App（哪怕只是去读一章书）它就没了 —— 而且完全静默。
+    check("⭐ 已弹出的通知只在一处被收：规划改完之后（不是每次开 App）",
+          lambda: eq(_remi.count("Notifier.cancelDue(ctx)"), 1)
+          and has("static void dropStaleNotification", _remi)
+          and has("PlanReminder.dropStaleNotification", _java))
+
+    # ---------------------------------------------------------- 与网页的契约
+    # ⭐ 桥方法名、JS 钩子名在两边对不上时：**编译通过、运行也不报错**，
+    #    表现只是“点了没反应”。编译器一个字都帮不上，只能靠这里交叉核对。
+    def _declares(m):
+        return any(f"{t}{m}(" in _java for t in
+                   ("public String ", "public boolean ", "public void ", "public int "))
+
+    for _m in ("reminderInfo", "requestNotify", "openExactAlarmSettings",
+               "autoStartVendor", "openAutoStartSettings", "testNotify",
+               "getPlans", "setPlans"):
+        check(f"桥方法两端都在：{_m}",
+              (lambda m: (lambda: has(f"native.{m}(", _js3) and eq(_declares(m), True)))(_m))
+
+    # 反方向也查一遍：app.js 里调的每个桥方法，原生都必须真的有 ——
+    # 少一个就是“点了没反应”，而这是最容易在手改代码时漏掉的
+    _called = sorted(set(re.findall(r"native\.([A-Za-z_][A-Za-z0-9_]*)\(", _js3)))
+    _missing = [m for m in _called if not _declares(m)]
+    check(f"⭐ app.js 调的 {len(_called)} 个桥方法原生全都实现了",
+          lambda: eq(_missing, []))
+
+    # ⭐ 第三个方向：原生暴露的桥方法必须**都被用到**。
+    #    没人调的桥方法不是"留着备用"，是**过期契约** —— 它会在下一次
+    #    改数据格式时被忘掉，然后某天有人照着手改页面，调到一个已经
+    #    跟事实对不上的方法，表现还是"点了没反应"。
+    _exposed = sorted(set(re.findall(
+        r"@JavascriptInterface\s+public\s+\S+\s+(\w+)\s*\(", _java)))
+    _unused = [m for m in _exposed if m not in _called]
+    check(f"⭐ 原生暴露的 {len(_exposed)} 个桥方法网页全在用（没有死接口）",
+          lambda: eq(_unused, []))
+
+    check("⭐ JS 钩子两端同名：RadarPlansOpen",
+          lambda: has("window.RadarPlansOpen", _js3) and has("window.RadarPlansOpen", _java))
+    check("⭐ JS 钩子两端同名：RadarReminderRefresh",
+          lambda: has("window.RadarReminderRefresh", _js3)
+          and has("window.RadarReminderRefresh", _java))
+    check("⭐ 钩子是“带返回值”调用的（否则分不清“打不开”和“还没有”）",
+          lambda: has("JS_OPEN_PLANS", _java) and has("ValueCallback<String>", _java))
+    check("⭐ 打不开钩子时先回首页再试（面板只在首页上）",
+          lambda: has("panelTriedRoot", _java) and has("AppConfig.START_URL", _java))
+    check("点通知进 App 走 onNewIntent",
+          lambda: has("protected void onNewIntent(Intent it)", _java))
+    check("⭐ onNewIntent 里有 setIntent（否则第二次点通知就没反应）",
+          lambda: has("setIntent(it)", _java))
+    check("页面开始加载时清掉 pageLoaded（旧页面的钩子已经没了）",
+          lambda: has("pageLoaded = false", _java) and has("pageLoaded = true", _java))
+    check("⭐ 权限弹框一辈子只有一次：原生记了“问过了”",
+          lambda: has("PREF_NOTIFY_ASKED", _java))
+    check("⭐ 国产 ROM 自启动引导（不打开闹钟根本不响）",
+          lambda: has("com.miui.securitycenter", _java)
+          and has("vendorNeedingAutoStart", _java))
+    check("★ 提醒权限/排程任何异常都不许把 App 弄崩",
+          lambda: has("catch (Exception ignored)", _remi) and has("catch (SecurityException", _remi))
+
+    # ---------------------------------------------------------- 网页层
+    check("设置页有「规划提醒」区块", lambda: has('id="set-remind"', _set2))
+    for _id in ("rem-next", "rem-notify", "rem-exact", "rem-test", "rem-perm",
+                "rem-exact-btn", "rem-boot", "rem-msg"):
+        check(f"设置页含 #{_id}", (lambda i: (lambda: has(f'id="{i}"', _set2)))(_id))
+    # 提醒区块必须在 #set-native 里面 —— 否则浏览器里会露出一排点不动的按钮
+    check("⭐ 提醒区块只在 App 内显示（放在 #set-native 里）",
+          lambda: _set2.index('id="set-remind"') > _set2.index('id="set-native"'))
+    check("⭐ 提醒区块是空壳：模板里不注入任何值",
+          lambda: eq("{{" in _set2[_set2.index('id="set-remind"'):
+                                   _set2.index('id="set-perm-panel"')], False))
+    check("设置页会自己重画（从系统设置页回来时）",
+          lambda: has("window.RadarReminderRefresh = paintRemind", _js3))
+    check("原生从后台回来时喊网页重画",
+          lambda: has("refreshReminderUi()", _java))
+
+    check("规划面板里有提醒状态行", lambda: has('id="plan-remind"', _base3))
+    # ⚠️ 块级元素包进 <p> 会被浏览器静默截断：页面看着正常，DOM 已经变了
+    check("⭐ 提醒行用 div 不用 p（里面要放按钮）",
+          lambda: has('<div id="plan-remind" class="plan-remind" hidden>', _base3))
+    check("提醒行的 id 在 app.js 里被取到",
+          lambda: has('getElementById("plan-remind")', _js3)
+          and has('getElementById("plan-remind-btn")', _js3))
+    check("样式给提醒行留了位置（flex + min-width:0 防撑破）",
+          lambda: has(".plan-remind {", _css3) and has(".plan-remind > span {", _css3))
+    check("提醒区块文案由网页拼（原生只给事实）",
+          lambda: has("paintRemind", _js3) and has("reminderInfo", _js3))
+    check("测试提醒按钮接着桥", lambda: has("native.testNotify()", _js3))
+    # 面板里不再自己算“下一次什么时候响”—— 那必须只有一份真相
+    check("⭐ 网页不自己算提醒时刻（只显示原生给的事实）",
+          lambda: has("info.when", _js3))
+
+    # ---------------------------------------------------------- 构建脚本
+    _cls_list = _build.split("for cls in", 1)[1].split("do", 1)[0]
+    for _c in ("Notifier", "PlanReminder", "PlanAlarmReceiver"):
+        check(f"build.sh 点名确认 {_c}.java",
+              (lambda c: (lambda: has(c, _cls_list)))(_c))
+
+    # ---------------------------------------------------------- 产物
+    _sethtml = ROOT / "public/settings/index.html"
+    check("产物里有设置页", lambda: eq(_sethtml.is_file(), True))
+    if _sethtml.is_file():
+        check("产物设置页含提醒区块",
+              lambda: has('id="set-remind"', _sethtml.read_text(encoding="utf-8")))
+    check("产物首页含提醒状态行",
+          lambda: has('id="plan-remind"',
+                      (ROOT / "public/index.html").read_text(encoding="utf-8")))
+    check("产物脚本含 RadarPlansOpen",
+          lambda: has("window.RadarPlansOpen",
+                      (ROOT / "public/static/app.js").read_text(encoding="utf-8")))
+    check("产物样式含提醒行",
+          lambda: has(".plan-remind {",
+                      (ROOT / "public/static/style.css").read_text(encoding="utf-8")))
+
+    # ---------------------------------------------------------- 文档
+    check("README 记录了到期提醒", lambda: has("到期提醒", _readme3))
+    check("README 写清了提醒只存手机本地",
+          lambda: has("早上 9:00", _readme3))
+except Exception as exc:  # noqa: BLE001
+    import traceback
+    print("  [!!] 到期提醒检查抛异常：")
+    print(traceback.format_exc())
+    FAILED.append("reminder")
 
 print("\n" + "=" * 52)
 if FAILED:

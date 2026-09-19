@@ -109,10 +109,18 @@ async function goto(path) {
 const STUB = `(() => {
   const calls = [];
   const st = { plans: "", bytes: 0, failNext: false };
+  /* 提醒相关的状态全部可调 —— 好在一次运行里把"四种状态"都走一遍。
+     默认给一个"什么都齐备、有一条 10 月 1 日到期的规划"的场面。 */
+  st.remind = { notify: true, exact: true, pending: true,
+                when: "10月1日 09:00", count: 1, titles: "读完 vLLM Scheduler 源码" };
+  st.vendor = "小米";
+  st.testOk = true;
   window.__calls = calls;
   window.__stub = st;
   window.__failNextSave = () => { st.failNext = true; };
   window.__callsOf = (n) => calls.filter(c => c[0] === n);
+  window.__setRemind = (o) => { Object.assign(st.remind, o); };
+  window.__setVendor = (v) => { st.vendor = v; };
   window.RadarNative = {
     versionName: () => "9.9",
     versionCode: () => 99,
@@ -131,10 +139,39 @@ const STUB = `(() => {
       return true;
     },
     plansBytes: () => st.bytes,
+    reminderInfo: () => { calls.push(["reminderInfo"]); return JSON.stringify(st.remind); },
+    canNotify: () => !!st.remind.notify,
+    requestNotify: () => calls.push(["requestNotify"]),
+    openNotifySettings: () => calls.push(["openNotifySettings"]),
+    exactAlarmAllowed: () => !!st.remind.exact,
+    openExactAlarmSettings: () => calls.push(["openExactAlarmSettings"]),
+    autoStartVendor: () => st.vendor,
+    openAutoStartSettings: () => calls.push(["openAutoStartSettings"]),
+    testNotify: () => { calls.push(["testNotify"]); return st.testOk; },
   };
 })();`;
 
+/* ⭐ 原生侧真正会去执行的那串握手表达式（MainActivity.JS_OPEN_PLANS）。
+   这里**逐字照抄**，不图省事改写成别的形式：
+   它验的就是"原生那一侧调进来会发生什么"，改一个字符验的就不是同一件事了。
+   返回 "ok" 才算掀面板成功；返回 "no" 时原生会先回首页再试。 */
+const HOOK_JS = "(function(){"
+  + "if(typeof window.RadarPlansOpen==='function'){window.RadarPlansOpen();return 'ok';}"
+  + "return 'no';})()";
+
 const NO_BRIDGE = `(() => { delete window.RadarNative; })();`;
+
+/* 旧壳：桥在，但**没有提醒那几个方法** —— 就是用户手机上还会装着的 v1.6。
+   这个状态一定会出现（页面先更新、App 后更新），所以必须单独验一遍：
+   拿不到提醒信息时，页面**不能**按"没权限"报，也不能画一个点了没反应的按钮。 */
+const LEGACY_BRIDGE = `(() => {
+  if (!window.RadarNative) return;
+  delete window.RadarNative.reminderInfo;
+  delete window.RadarNative.canNotify;
+  delete window.RadarNative.requestNotify;
+  delete window.RadarNative.autoStartVendor;
+  delete window.RadarNative.testNotify;
+})();`;
 
 await connect();
 await send("Runtime.enable");
@@ -311,9 +348,134 @@ await sleep(350);
 check("App 分支：页面 JS 无异常", pageErrors.length === 0, pageErrors.length ? pageErrors : undefined);
 
 /* ==========================================================================
-   二、浏览器分支：没有原生桥
+   三、到期提醒（到期当天 9:00 的系统通知）
+   提醒本身是**系统通知**，无头浏览器里弹不出来 —— 所以这里能验的、也最该验的
+   是三件事：
+     · 把那串"握手表达式"原样跑一遍：点通知进来时原生调的就是它，
+       返回 "ok" 才算掀开了面板（返回 "no" 原生会先回首页再试）
+     · 四种状态（权限齐备 / 没通知权限 / 没准点权限 / 还没定日期）下
+       面板那一行说的是不是人话、按钮出没出来
+     · 按钮点了真的会去调桥 —— 而不是摆个装饰
    ========================================================================== */
-console.log("\n—— 二、浏览器（无桥）——");
+console.log("\n—— 二、到期提醒 ——");
+pageErrors.length = 0;
+await goto("/");
+
+/* ---- 原生那条握手路径 ---- */
+console.log("\n  · 点通知进来（原生握手）");
+await evalJs(`
+  if (!document.getElementById('plans-modal').hidden) {
+    document.querySelector('#plans-modal .plans-x').click();
+  }`);
+await sleep(350);
+check("握手前面板是关着的", await evalJs(`document.getElementById('plans-modal').hidden === true`));
+check("⭐ 原生的握手表达式返回 ok", (await evalJs(HOOK_JS)) === "ok");
+await sleep(400);
+check("⭐ 面板真的被掀开了（这才是“点通知能进面板”的证据）",
+  await evalJs(`document.getElementById('plans-modal').hidden === false`));
+check("掀开的是 App 分支（不是浏览器说明卡）",
+  await evalJs(`document.getElementById('plans-app').hidden === false`));
+await evalJs(`document.querySelector('#plans-modal .plans-x').click()`);
+await sleep(350);
+check("已经开着时再握一次手不会把它关掉", await evalJs(`
+  (() => {
+    const r = ${HOOK_JS};
+    return r === 'ok' && document.getElementById('plans-modal').hidden === false;
+  })()`));
+await evalJs(`document.querySelector('#plans-modal .plans-x').click()`);
+await sleep(350);
+/* 钩子不在的页面（理论上不会，但真出事时原生得能分辨出来）→ 必须是 "no" */
+check("⭐ 钩子不在时报 no（原生据此先回首页再试）", await evalJs(`
+  (() => {
+    const saved = window.RadarPlansOpen;
+    delete window.RadarPlansOpen;
+    const r = ${HOOK_JS};
+    window.RadarPlansOpen = saved;
+    return r === 'no';
+  })()`));
+
+/* ---- 面板里那一行状态 ---- */
+console.log("\n  · 面板里的提醒状态");
+async function openPanel() {
+  await evalJs(`
+    if (document.getElementById('plans-modal').hidden) {
+      document.getElementById('plans-btn').click();
+    }`);
+  await sleep(400);
+}
+async function closePanel() {
+  await evalJs(`
+    if (!document.getElementById('plans-modal').hidden) {
+      document.querySelector('#plans-modal .plans-x').click();
+    }`);
+  await sleep(350);
+}
+
+await openPanel();
+check("提醒状态行露出来了", await evalJs(`document.getElementById('plan-remind').hidden === false`));
+check("状态行读的是原生给的事实", await evalJs(`window.__callsOf('reminderInfo').length >= 1`));
+check("权限齐备时说清 9:00 提醒", await evalJs(
+  `document.getElementById('plan-remind-txt').textContent.indexOf('9:00') >= 0`));
+check("不需要操作时不摆按钮", await evalJs(`document.getElementById('plan-remind-btn').hidden === true`));
+
+await closePanel();
+await evalJs(`window.__setRemind({ notify: false })`);
+await openPanel();
+check("⭐ 没通知权限时明确说发不出来", await evalJs(
+  `document.getElementById('plan-remind-txt').textContent.indexOf('通知权限没开') >= 0`));
+check("并给一个按钮", await evalJs(
+  `document.getElementById('plan-remind-btn').hidden === false
+   && document.getElementById('plan-remind-btn').textContent === '开启通知'`));
+const beforeReq = await evalJs(`window.__callsOf('requestNotify').length`);
+await evalJs(`document.getElementById('plan-remind-btn').click()`);
+await sleep(200);
+check("⭐ 按钮真的去调 bridge 要权限（不是装饰）", await evalJs(
+  `window.__callsOf('requestNotify').length === ${beforeReq} + 1`));
+
+await closePanel();
+await evalJs(`window.__setRemind({ notify: true, exact: false })`);
+await openPanel();
+check("没准点权限时如实说可能晚一会儿", await evalJs(
+  `document.getElementById('plan-remind-txt').textContent.indexOf('晚一会儿') >= 0`));
+check("这种情况不需要用户动手，不给按钮", await evalJs(
+  `document.getElementById('plan-remind-btn').hidden === true`));
+
+await closePanel();
+await evalJs(`window.__setRemind({ exact: true, pending: false, when: "", count: 0 })`);
+await openPanel();
+check("还没有定日期的规划时引导去填日期", await evalJs(
+  `document.getElementById('plan-remind-txt').textContent.indexOf('目标日期') >= 0`));
+
+check("提醒状态行不依赖页面自己算的时刻", await evalJs(
+  `window.__callsOf('reminderInfo').length >= 4`));
+check("到期提醒：页面 JS 无异常", pageErrors.length === 0, pageErrors.length ? pageErrors : undefined);
+
+await closePanel();
+
+/* ==========================================================================
+   三、旧壳：桥在、但没有提醒那几个方法
+   —— 就是用户手机上还会装的 v1.6。页面先更新、App 后更新，这个状态必然出现。
+   ========================================================================== */
+console.log("\n—— 三、旧壳（桥没有提醒方法）——");
+pageErrors.length = 0;
+await send("Page.addScriptToEvaluateOnNewDocument", { source: LEGACY_BRIDGE });
+await goto("/");
+check("旧壳下看板还在（只是少了提醒的方法）",
+  await evalJs(`typeof window.RadarNative === 'object'
+                && typeof window.RadarNative.reminderInfo === 'undefined'`));
+await openPanel();
+check("面板照常能开", await evalJs(`document.getElementById('plans-modal').hidden === false`));
+check("⭐ 拿不到提醒信息时**不显示**状态行（不猜、不误报）",
+  await evalJs(`document.getElementById('plan-remind').hidden === true`));
+check("旧壳下页面 JS 无异常（少了方法也不能崩）",
+  pageErrors.length === 0, pageErrors.length ? pageErrors : undefined);
+await evalJs(`document.querySelector('#plans-modal .plans-x').click()`);
+await sleep(350);
+
+/* ==========================================================================
+   四、浏览器分支：没有原生桥
+   ========================================================================== */
+console.log("\n—— 四、浏览器（无桥）——");
 pageErrors.length = 0;
 await send("Page.addScriptToEvaluateOnNewDocument", { source: NO_BRIDGE });
 await goto("/");
@@ -325,6 +487,8 @@ check("打开后显示浏览器说明卡", await evalJs(`document.getElementById
 check("说明卡文案明确说只在 App 内可用", await evalJs(
   `document.getElementById('plans-web').textContent.indexOf('只在安卓 App 里可用') >= 0`));
 check("**不显示** App 分支（没有假输入框）", await evalJs(`document.getElementById('plans-app').hidden === true`));
+check("提醒状态行在浏览器里也不出现（网页端没有提醒这回事）",
+  await evalJs(`document.getElementById('plan-remind').hidden === true`));
 check("页面上没有可输入的规划框", await evalJs(`
   (() => {
     const el = document.getElementById('plan-title');
