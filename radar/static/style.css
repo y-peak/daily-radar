@@ -2754,3 +2754,192 @@ body.plans-open { overflow: hidden; }
   .brief-row { flex-wrap: wrap; }
   .brief-time { width: 100%; }
 }
+
+/* =========================================================================
+   34. 相关新闻（/news/）
+   -------------------------------------------------------------------------
+   新闻页的排版契约只有一条：**时间是主轴，标题是主角**。
+   所以左边一条窄窄的时刻栏固定宽度（数字等宽，扫视时不会跟着字数晃），
+   右边正文占满剩余宽度；分组标题下面才出现来源/标签这些次要信息。
+   颜色只承担三件事：品牌蓝=「今天新增」、蓝标签=「自选命中」、黄=「来源没拉到」。
+   ========================================================================= */
+
+.news-hero {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--sp-2);
+}
+
+/* 「今日新增」值得比另外三个数显眼一点：它是这个页面存在的理由 */
+.stat-cell.accent { background: linear-gradient(180deg, var(--brand-dim) 0%, var(--surface-2) 50%); }
+.stat-cell.accent .num { color: var(--brand); }
+
+/* 来源失败提示。**必须醒目**：不说的话用户会以为"今天真没新闻" */
+.news-warn {
+  margin: var(--sp-4) 0 0;
+  padding: var(--sp-3);
+  font-size: var(--fs-sm);
+  line-height: 1.65;
+  color: var(--text);
+  background: var(--warn-dim);
+  border-left: 3px solid var(--warn);
+  border-radius: 0 var(--r-xs) var(--r-xs) 0;
+}
+.news-warn-line {
+  margin-top: var(--sp-1);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+
+/* ---------------------------------------------------------------- 分组导航 */
+.news-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+.news-nav a {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  padding: 6px 12px;
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-full);
+  transition: background var(--dur) var(--ease-out), border-color var(--dur) var(--ease-out);
+}
+.news-nav a:active { background: var(--hover); border-color: var(--brand); }
+.news-nav a b {
+  font-weight: 700;
+  font-feature-settings: "tnum" 1;
+  color: var(--text);
+}
+.news-nav a i.news-new { font-style: normal; }
+
+/* ---------------------------------------------------------------- 时间线 */
+.news-list { list-style: none; margin: 0; padding: 0; }
+.news-item {
+  display: flex;
+  gap: var(--sp-3);
+  padding: var(--sp-4) 0;
+  border-bottom: 1px solid var(--border);
+}
+.news-item:last-child { border-bottom: 0; padding-bottom: 0; }
+.news-item:first-child { padding-top: 0; }
+/* 新增的那条给一道很轻的品牌色带 —— 一行里能一眼看出"这是我还没看过的" */
+.news-item.is-fresh {
+  padding-left: var(--sp-3);
+  border-left: 2px solid var(--brand);
+  border-radius: 0 var(--r-xs) var(--r-xs) 0;
+}
+
+/* ⚠️ 固定宽度 + 等宽数字：不这样的话每行时刻宽度跟着字数变，整列会像锯齿 */
+.news-time {
+  flex: none;
+  width: 46px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-faint);
+  line-height: 1.7;
+}
+
+.news-body { flex: 1; min-width: 0; }
+.news-title {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  font-size: var(--fs-base);
+  line-height: 1.5;
+}
+.news-title a, .news-title strong {
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  overflow-wrap: anywhere;
+}
+.news-text {
+  margin: var(--sp-1) 0 0;
+  font-size: var(--fs-sm);
+  line-height: 1.6;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+  /* 两行截断：摘要只是"要不要点进去"的判断依据，全文在源站 */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.news-meta {
+  margin-top: var(--sp-2);
+  display: flex;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+/* 「新」与「自选」两枚小标 —— 页面里唯二用品牌色的地方 */
+.news-new {
+  padding: 1px 7px;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  color: var(--brand);
+  background: var(--brand-dim);
+  border-radius: var(--r-full);
+}
+.news-tag-hit { color: var(--brand); border-color: var(--brand); background: var(--brand-dim); }
+
+/* ---------------------------------------------------------------- 我的票 */
+.news-watch { list-style: none; margin: 0; padding: 0; }
+.news-watch-row {
+  padding: var(--sp-3) 0;
+  border-bottom: 1px solid var(--border);
+}
+.news-watch-row:last-child { border-bottom: 0; padding-bottom: 0; }
+.news-watch-row:first-child { padding-top: 0; }
+/* 名单里有、今天没消息的：压暗但**不隐藏** —— "没有消息"本身就是信息 */
+.news-watch-row.is-quiet { opacity: .55; }
+
+.news-watch-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+.news-watch-name { font-weight: 600; }
+.news-watch-code {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+}
+.news-watch-count {
+  margin-left: auto;
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+.news-watch-items {
+  list-style: none;
+  margin: var(--sp-2) 0 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+.news-watch-items li {
+  display: flex;
+  gap: var(--sp-2);
+  font-size: var(--fs-sm);
+  line-height: 1.55;
+}
+.news-watch-items .news-time { width: 40px; }
+.news-watch-items a { overflow-wrap: anywhere; }
+
+@media (max-width: 520px) {
+  .news-hero { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .news-time { width: 40px; }
+  /* 窄屏上标题独占一行，免得"新"标被挤到下一行看着像另一条 */
+  .news-title { gap: 4px; }
+}

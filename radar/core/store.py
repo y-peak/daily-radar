@@ -141,6 +141,16 @@ def _hero_for_module(name: str, data: dict, dates: list[str]) -> dict:
         if isinstance(avg, (int, float)) and data.get("count"):
             return {"value": avg, "suffix": "%", "decimals": 2,
                     "delta": None, "tone": s.get("tone") or "flat"}
+    elif name == "news":
+        # 新闻的首页数字：**今天新增几条**。
+        # 不用"总条数"：那是快讯流的窗口大小（每次拉都是最近 N 条），
+        # 天天都差不多，等于没信息。增量才是"今天有没有新东西"的答案。
+        st = data.get("stats") or {}
+        fresh = st.get("fresh")
+        if isinstance(fresh, (int, float)):
+            return {"value": fresh, "suffix": " 条", "decimals": 0,
+                    "delta": st.get("watch") or None,
+                    "tone": "accent" if fresh else "flat"}
     return {}
 
 
@@ -166,6 +176,12 @@ def _trend_for_module(name: str, data: dict, data_dir: Path, dates: list[str]) -
             if isinstance(g, (int, float)):
                 vals.append(float(g))
         label = "今日涨幅"
+    elif name == "news":
+        # 新闻用"今天各小时发了多少条" —— 它有信息量（能看出新闻密集的时段），
+        # 而且是**今天这一份快照自带**的，不需要跨日期读。
+        by_hour = data.get("by_hour") or []
+        vals = [float(v) for v in by_hour if isinstance(v, (int, float))]
+        label = "今日分时条数"
     poly = _trend_polylines(vals)
     if not poly:
         return {}

@@ -1,0 +1,212 @@
+{% if not dates %}
+<div class="empty">
+  <p><strong>{{ module.title }}</strong> 还没有数据。</p>
+  <p class="hint">执行 <code>python3 -m radar run news</code> 生成。</p>
+</div>
+{% else %}
+{# 一律用 .get 取值：历史页面是半年后也要能打开的静态快照。 #}
+{% set stats = data.get('stats', {}) %}
+{% set groups = data.get('groups', []) %}
+{% set hits = data.get('watch_hits', []) %}
+{% set errors = data.get('errors', {}) %}
+{% set digest = data.get('digest', '') %}
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>相关新闻</h2>
+    <span class="badge muted">{{ stats.get('total', 0) }} 条</span>
+  </div>
+
+  <div class="news-hero">
+    <div class="stat-cell accent">
+      <div class="label">今日新增</div>
+      <span class="num">{{ stats.get('fresh', 0) }}</span>
+      <span class="pct">条</span>
+    </div>
+    <div class="stat-cell up">
+      <div class="label">命中自选股</div>
+      <span class="num">{{ stats.get('watch', 0) }}</span>
+      <span class="pct">条</span>
+    </div>
+    <div class="stat-cell flat">
+      <div class="label">去重合并</div>
+      <span class="num">{{ stats.get('merged', 0) }}</span>
+      <span class="pct">条</span>
+    </div>
+    <div class="stat-cell flat">
+      <div class="label">页面展示</div>
+      <span class="num">{{ stats.get('shown', 0) }}</span>
+      <span class="pct">/ {{ stats.get('total', 0) }}</span>
+    </div>
+  </div>
+
+  {# ⚠️ 来源挂了必须说出来。不说的话用户会以为"今天真的没有相关新闻"，
+      而真相是"我们没拿到" —— 这两种情况必须分清。 #}
+  {% if errors %}
+  <div class="news-warn">
+    ⚠️ 有来源没拉到，下面的条数会偏少：
+    {% for key, msg in errors.items() %}
+    <div class="news-warn-line"><code>{{ key }}</code> {{ msg }}</div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% if digest %}
+  <div class="ai-box">
+    <p class="ai-head">今日导读
+      {% if data.get('digest_model') %}<span class="tag">{{ data.get('digest_model') }}</span>{% endif %}
+    </p>
+    <p class="ai-detail">{{ digest }}</p>
+  </div>
+  {% endif %}
+
+  <div class="rank-meta">
+    {% if data.get('fetching') %}拉取中 ·{% endif %}
+    {% if data.get('fetched_at') %}<span>拉取 {{ data.get('fetched_at')[5:16] | replace('T', ' ') }}</span>{% endif %}
+    <span>规则来自 {{ data.get('rules_source', '—') }}</span>
+    {% for s in stats.get('sources', []) %}
+    <span class="tag">{{ s.get('name') }} {{ s.get('count') }}</span>
+    {% endfor %}
+  </div>
+</section>
+
+{# ============================================================ 我的票 ==========
+   这块是页面的**主入口**：先说"我盯的标的今天有什么事"，再往下才是大盘。
+   名单里有、今天没消息的标的也照常列出（写"暂无"）—— "没有消息"本身是信息，
+   整块消失会让人以为名单被丢了。 #}
+{% if hits %}
+<section class="panel">
+  <div class="panel-head">
+    <h2>我的自选股</h2>
+    <span class="badge muted">{{ hits | length }} 只</span>
+  </div>
+  <ul class="news-watch">
+    {% for h in hits %}
+    <li class="news-watch-row {% if not h.get('count') %}is-quiet{% endif %}">
+      <div class="news-watch-head">
+        <span class="news-watch-name">{{ h.get('name') or h.get('code') or '—' }}</span>
+        <span class="news-watch-code">{{ h.get('code', '') }}</span>
+        {% if h.get('fresh') %}<span class="news-new">新 {{ h.get('fresh') }}</span>{% endif %}
+        <span class="news-watch-count">{% if h.get('count') %}{{ h.get('count') }} 条{% else %}暂无{% endif %}</span>
+      </div>
+      {% if h.get('items') %}
+      <ul class="news-watch-items">
+        {% for it in h.get('items') %}
+        <li>
+          <span class="news-time">{{ it.get('time', '') }}</span>
+          {% if it.get('url') %}
+          <a href="{{ it.get('url') }}" target="_blank" rel="noopener">{{ it.get('title', '') }}</a>
+          {% else %}
+          <span>{{ it.get('title', '') }}</span>
+          {% endif %}
+        </li>
+        {% endfor %}
+      </ul>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% if data.get('watchlist_updated_at') %}
+  <p class="hint">名单更新于 {{ data.get('watchlist_updated_at') | replace('T', ' ') }} ——
+    在 <a href="/watchlist/">我的自选股</a> 里改。</p>
+  {% endif %}
+</section>
+{% endif %}
+
+{# ============================================================ 分组时间线 ==== #}
+{% if groups %}
+<section class="panel">
+  <div class="panel-head">
+    <h2>按主题分组</h2>
+    <span class="badge muted">每组有名额上限</span>
+  </div>
+  <nav class="news-nav" aria-label="跳到分组">
+    {% for g in groups %}
+    {% if g.get('items') %}
+    <a href="#g{{ loop.index }}">
+      {{ g.get('name') }}
+      <b>{{ g.get('shown') }}</b>
+      {% if g.get('fresh') %}<i class="news-new">+{{ g.get('fresh') }}</i>{% endif %}
+    </a>
+    {% endif %}
+    {% endfor %}
+  </nav>
+</section>
+
+{% for g in groups %}
+{% if g.get('items') %}
+<section class="panel" id="g{{ loop.index }}">
+  <div class="panel-head">
+    <h2>{% if g.get('is_watch') %}★ {% endif %}{{ g.get('name') }}</h2>
+    <span class="badge muted">
+      {% if g.get('count') > g.get('shown') %}{{ g.get('shown') }} / {{ g.get('count') }}
+      {% else %}{{ g.get('count') }}{% endif %} 条
+    </span>
+  </div>
+  {% if g.get('count') > g.get('shown') %}
+  <p class="hint">这一组今天有 {{ g.get('count') }} 条，按上限只列了最新的
+    {{ g.get('shown') }} 条 —— 想看全的可以调 <code>data/news_rules.txt</code> 里的 <code>@</code>。</p>
+  {% endif %}
+  <ul class="news-list">
+    {% for it in g.get('items') %}
+    <li class="news-item {% if it.get('fresh') %}is-fresh{% endif %}">
+      <span class="news-time">{{ it.get('time', '') }}</span>
+      <div class="news-body">
+        <div class="news-title">
+          {% if it.get('url') %}
+          <a href="{{ it.get('url') }}" target="_blank" rel="noopener">{{ it.get('title', '') }}</a>
+          {% else %}
+          <strong>{{ it.get('title', '') }}</strong>
+          {% endif %}
+          {% if it.get('fresh') %}<span class="news-new">新</span>{% endif %}
+        </div>
+        {% if it.get('text') and it.get('text') != it.get('title') %}
+        <div class="news-text">{{ it.get('text', '')[:160] }}</div>
+        {% endif %}
+        <div class="news-meta">
+          {% for lbl in it.get('src_labels', []) %}<span class="tag">{{ lbl }}</span>{% endfor %}
+          {% for t in it.get('tags', [])[:3] %}<span class="tag">{{ t }}</span>{% endfor %}
+          {% for h in it.get('hit', []) %}<span class="tag news-tag-hit">自选 · {{ h.get('name') or h.get('code') }}</span>{% endfor %}
+          {# 源自带的关联标的（不是自选股里的）也值得标出来 ——
+             它常常正是"这条为什么值得看一眼"的答案。已在 module 里最多截两个。 #}
+          {% for s in it.get('extra_symbols', []) %}
+          <span class="tag news-tag-stock">{{ s.get('name') }}</span>
+          {% endfor %}
+        </div>
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+{% endfor %}
+{% else %}
+<section class="panel">
+  <div class="empty">
+    <p>今天还没有归类的新闻。</p>
+  </div>
+</section>
+{% endif %}
+
+<section class="panel">
+  <div class="panel-head"><h2>说明</h2></div>
+  <div class="prose">
+    <ul>
+      <li>来源：<strong>华尔街见闻快讯</strong>（A股 / 全球 / 美股 / 港股 / 外汇五个频道）与
+          <strong>新浪财经 7×24</strong>，都是公开接口。</li>
+      <li><strong>去重</strong>：同一条快讯常被两个源同时报道，按「规范化标题」合并成一条，
+          两个来源都会标出来；重复报道时间更早的那条说了算。</li>
+      <li><strong>「新」</strong>表示这条在今天之前几天的快照里没出现过 ——
+          快讯流每次拉回来的都是"最近一批"，不标增量的话每次打开看到的都是同一批。</li>
+      <li><strong>「自选」</strong>命中靠三路：源自带的关联标的、正文里的 6 位代码、
+          以及名字（<strong>只认三个字以上的名字</strong>）。
+          两个字的名字（"平安""中国"）在财经新闻里到处都是，拿它去撞会造出假信号，
+          所以只认代码。</li>
+      <li><strong>分组</strong>是机械的关键词规则，走
+          <code>data/news_rules.txt</code>（你自己改的）或内置默认，每组有名额上限 ——
+          一个没人能看完的页面等于没有。</li>
+      <li>页面按日期存档，历史页是当时那份快照的重放：分组、增量标记都不会变。</li>
+    </ul>
+  </div>
+</section>
+{% endif %}

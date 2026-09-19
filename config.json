@@ -75,6 +75,22 @@
       "margin": true
     },
 
+    "news": {
+      "enabled": true,
+      "per_channel": 30,
+      "sina_size": 100,
+      "fresh_days": 3,
+      "watch_limit": 20,
+      "unclassified_limit": 8,
+      "rules": "",
+      "digest": {
+        "enabled": true,
+        "max_items": 60,
+        "max_tokens": 900
+      },
+      "note": "分组规则可用 data/news_rules.txt 覆盖（不入库）；语法见 radar/modules/news/rules.py"
+    },
+
     "watchlist": {
       "enabled": true,
       "note": "名单存在 data/watchlist.json（不入库），在 /watchlist/ 页面或 App 里改"

@@ -331,7 +331,7 @@ found = registry.discover(cfg.modules_dir)
 # ⚠️ 别再写死模块数量。加一个模块就红一片的测试是**噪音**，只会训练人忽略失败。
 # 这里改为断言"内置模块都在"，并把底栏数量从注册表推出来 —— 加模块时该改的是
 # 这一行的清单（失败信息会明确说少了谁），而不是三个散落的魔数。
-BUILTIN_MODULES = ["github_trending", "market_flow", "reader", "watchlist"]
+BUILTIN_MODULES = ["github_trending", "market_flow", "news", "reader", "watchlist"]
 check("发现全部内置模块", lambda: eq(sorted(found), sorted(BUILTIN_MODULES)))
 check("name 与目录一致", lambda: eq(all(k == v.name for k, v in found.items()), True))
 check("order 排序", lambda: eq(
@@ -3036,6 +3036,509 @@ except Exception as exc:  # noqa: BLE001
     print("  [!!] 简报检查抛异常：")
     print(traceback.format_exc())
     FAILED.append("brief")
+
+# ==================================================== 20. 相关新闻（news 模块）
+# 这一段存在的理由很直接：**「自选股命中」这件事靠真实数据是验不出来的**。
+# 上次跑通的当天，250 条快讯里一个自选股名字都没出现（`茅台` 全文 0 次），
+# 于是"命中 0 条"既可能是功能坏了、也可能是真的没有 —— 分不清的测试等于没有测试。
+# 这里用合成条目把三条匹配路径、去重合并、分组顺序、增量判定全部钉死，
+# 不联网、不依赖当天恰好发生什么新闻。
+print("\n== 20. 相关新闻（news 模块）==")
+try:
+    import json as _json20
+    import sys as _sys20
+    import tempfile as _tf20
+    from datetime import datetime as _dt20
+    from pathlib import Path as _Path20
+
+    from radar.core.module import load_sibling as _ls20
+
+    _nd = cfg.modules_dir / "news"
+    _nsrc = _ls20(str(_nd / "sources.py"), "sources")
+    _nrules = _ls20(str(_nd / "rules.py"), "rules")
+    _nmod = registry.discover(cfg.modules_dir)["news"]
+    # 取到 module.py 那个**模块对象**（不是类）—— 里面是 _watch_hits / _trim 这些纯函数
+    _nmodobj = (_sys20.modules.get(f"radar_dyn_{_nmod.name}")
+                or _sys20.modules.get(_nmod.__module__))
+    check("能取到 news 的模块对象（纯函数才测得到）",
+          lambda: eq(_nmodobj is not None, True))
+
+    # ---------------------------------------------------------- 标题规范化 / 去重键
+    check("norm_title：全角转半角 + 去标点 + 转小写",
+          lambda: eq(_nrules.norm_title("ＡＢＣ １２３！"), "abc123"))
+    check("norm_title：中文标点也去掉",
+          lambda: eq(_nrules.norm_title("A股，涨了。"), "a股涨了"))
+    check("norm_title：非字符串 → 空串，不抛",
+          lambda: eq(_nrules.norm_title(None), ""))
+    # ⭐ 去重键里**不许有日期**：含了日期的话，"同一条新闻在两天里各被报一次"
+    #    就永远判不出重复，跨源去重整块失效。
+    check("⭐ guid 不含日期（同一标题跨天必须同号）",
+          lambda: eq(_nrules.guid("同一件事"), _nrules.guid("同一件事"))
+          and eq(len(_nrules.guid("同一件事")), 16))
+    check("guid 对规范等价的标题相同（标点/全角/大小写不算差别）",
+          lambda: eq(_nrules.guid("ＡＢＣ！"), _nrules.guid("abc")))
+    # ⭐ 空标题必须拿到**空串**。写成"照常算 sha1"的话所有无标题条目会拿到同一个
+    #    常量 `sha1('')`，于是被合并成一条 —— 页面表现为"少了几条"，
+    #    而且合出来的那条标题是空的，谁也看不出发生过什么。
+    check("⭐ 只有标点/空白、没有实质内容的标题，guid 也是空串",
+          lambda: eq(_nrules.guid(""), "") and eq(_nrules.guid("！！？ …"), ""))
+
+    # ---------------------------------------------------------- 规则解析
+    _g20 = _nrules.parse("""\
+# 这是注释，要跳过
+[甲]
++苹果 / 梨
+!坏的
+@5
+/\\d+/
+[乙]
++香蕉
+""")
+    check("parse：注释跳过、两组出来",
+          lambda: eq([g.name for g in _g20], ["甲", "乙"]))
+    check("parse：`+` 里用 / 分隔成多个候选词",
+          lambda: eq(_g20[0].must, ["苹果", "梨"]))
+    check("parse：`!` 进 deny", lambda: eq(_g20[0].deny, ["坏的"]))
+    check("parse：`@` 设上限", lambda: eq(_g20[0].limit, 5))
+    check("parse：`/../` 编译成正则", lambda: eq(len(_g20[0].regexes), 1))
+    check("@ 上限被夹进 1..MAX（写 999 也不许把页面撑爆）",
+          lambda: eq(_nrules.parse("[甲]\n+苹果\n@999")[0].limit,
+                     _nrules.MAX_GROUP_ITEMS))
+    check("坏正则只跳过那一行，不抛异常",
+          lambda: eq(len(_nrules.parse("[甲]\n+苹果\n/([a-/")[0].regexes), 0)
+          and eq(_nrules.parse("[甲]\n+苹果\n/([a-/")[0].must, ["苹果"]))
+    check("⭐ 组名之前的裸词自己起兜底组（用户少写一个 [ ] 不该丢规则）",
+          lambda: eq(_nrules.parse("+苹果")[0].name, _nrules.FALLBACK_GROUP))
+    check("没有任何条件的空组被丢掉", lambda: eq(_nrules.parse("[空组]"), []))
+    check("规则文本为空 → 空列表，不抛", lambda: eq(_nrules.parse(""), []))
+
+    # ---------------------------------------------------------- match 语义
+    _m20 = _nrules.Group("x")
+    _m20.must = ["苹果", "梨"]
+    _m20.deny = ["坏"]
+    check("`+` 内部是 OR（命中任一即可）", lambda: eq(_m20.match("这里有梨"), True))
+    check("⭐ `!` 优先级高于 `+`（命中即否，哪怕 + 也中了）",
+          lambda: eq(_m20.match("坏梨"), False))
+    check("一个都没命中 → False", lambda: eq(_m20.match("香蕉"), False))
+    check("match 对英文大小写不敏感", lambda: eq(
+        (lambda g: (setattr(g, "must", ["lpr"]), g.match("LPR 下调"))[1])(_nrules.Group("y")),
+        True))
+    _m20b = _nrules.Group("z")
+    _m20b.must = ["回购"]
+    _m20b.regexes = [re.compile("公告")]
+    # ⭐ `+` 与 `/regex/` 之间是 AND —— 正则用来表达"必须同时满足的额外约束"
+    check("⭐ `+` 与 `/regex/` 之间是 AND（缺正则就不算命中）",
+          lambda: eq(_m20b.match("回购公告"), True)
+          and eq(_m20b.match("回购了"), False))
+
+    # ---------------------------------------------------------- 默认规则的顺序
+    _dg20 = _nrules.parse(_nrules.DEFAULT_RULES)
+    _names20 = [g.name for g in _dg20]
+    check("内置默认解析出 5 组", lambda: eq(len(_dg20), 5))
+    check("内置默认含 大盘/政策/全球/公司/其它",
+          lambda: eq(_names20, ["大盘", "政策", "全球", "公司", "其它"]))
+    # ⭐ 顺序即归属（先到先得）。「全球」排在「公司」前面是刻意的：
+    #    讲美联储/油价的稿子常顺带提一句公司业绩，先撞「公司」的话
+    #    全球大事会被塞进公司组，**两个组一起失真**。
+    check("⭐ 「全球」排在「公司」前面（否则全球大事被塞进公司组）",
+          lambda: eq(_names20.index("全球") < _names20.index("公司"), True))
+    check("⭐ 同时提美联储与公司业绩 → 归「全球」",
+          lambda: eq(_nrules.classify("美联储加息，公司业绩承压", _dg20), "全球"))
+    check("提沪指 → 大盘", lambda: eq(_nrules.classify("沪指午后翻红", _dg20), "大盘"))
+    check("提央行 → 政策", lambda: eq(_nrules.classify("央行开展逆回购操作", _dg20), "政策"))
+    check("提业绩 → 公司", lambda: eq(_nrules.classify("某公司业绩预增", _dg20), "公司"))
+    check("都不中 → 未归类",
+          lambda: eq(_nrules.classify("名古屋亚运会开幕", _dg20), _nrules.FALLBACK_GROUP))
+
+    # ---------------------------------------------------------- 跨源合并
+    _mm20, _st20 = _nrules.merge([
+        {"src": "a", "sid": "a:1", "src_label": "源A", "title": "同一条新闻", "ts": 200,
+         "tags": ["甲"], "symbols": [{"market": "cn", "code": "600519", "name": "贵州茅台"}]},
+        {"src": "b", "sid": "b:9", "src_label": "源B", "title": "同一条新闻！", "ts": 100,
+         "tags": ["乙"], "symbols": [{"market": "hk", "code": "00700", "name": "腾讯控股"}]},
+        {"src": "a", "sid": "a:2", "src_label": "源A", "title": "另一件事", "ts": 300},
+    ])
+    _row20 = [r for r in _mm20 if r["title"].startswith("同一条")][0]
+    check("规范化标题相同 → 合并成一条", lambda: eq(len(_mm20), 2))
+    check("in / out / merged 计数",
+          lambda: eq((_st20["in"], _st20["out"], _st20["merged"]), (3, 2, 1)))
+    # 「发生时间」是它最早出现的时刻 —— 后到的重复报道不该把时间往后推
+    check("⭐ 合并保留最早的时间戳", lambda: eq(_row20["ts"], 100))
+    check("两个来源都并起来（页面上显示「见闻 + 新浪」比显示一家有信息量）",
+          lambda: eq(sorted(_row20["sources"]), ["a", "b"]))
+    check("两个来源标签都并起来", lambda: eq(sorted(_row20["src_labels"]), ["源A", "源B"]))
+    check("两个 sid 都留着（排查时要知道它俩是同一件事）",
+          lambda: eq(sorted(_row20["sids"]), ["a:1", "b:9"]))
+    # ⭐⭐ 这两条是本段**最要紧**的断言：symbols 是「自选股命中」的原料，
+    #     而自选股又是整个页面里最该看的那一块。它一旦在合并里被吃掉，
+    #     表现是"功能安静地全灭"—— 页面照常出，只是永远命中 0 条。
+    check("⭐ tags 合并（去重合并那一支不许把它们吃掉）",
+          lambda: eq(sorted(_row20["tags"]), ["乙", "甲"]))
+    check("⭐⭐ symbols 合并（「自选股命中」的原料，丢了整块功能静默失效）",
+          lambda: eq(len(_row20["symbols"]), 2))
+    check("guid 写进条目", lambda: eq(_row20["guid"], _nrules.guid("同一条新闻")))
+    check("没标题的条目直接丢掉（去重键为空的不许进桶）",
+          lambda: eq(len(_nrules.merge([{"title": ""}, {"title": None}])[0]), 0))
+    check("非 dict 的条目跳过，不抛",
+          lambda: eq(len(_nrules.merge(["不是字典", None])[0]), 0))
+
+    # ---------------------------------------------------------- 增量（跨日期读）
+    # ⚠️ 单独一个临时目录：下面还要用 _d20 建站，别把假历史混进去。
+    _d20h = _Path20(_tf20.mkdtemp(prefix="radar20h_"))
+    check("没有历史快照 → 空集合，不抛",
+          lambda: eq(_nrules.recent_guids(_d20h, "2026-09-19", 3), set()))
+    (_d20h / "news").mkdir(parents=True, exist_ok=True)
+    (_d20h / "news" / "2026-09-18.json").write_text(
+        _json20.dumps({"items": [{"guid": "g1"}, {"guid": "g2"}]}), encoding="utf-8")
+    (_d20h / "news" / "2026-09-17.json").write_text(
+        _json20.dumps({"groups": [{"items": [{"guid": "g3"}]}]}), encoding="utf-8")
+    (_d20h / "news" / "2026-09-16.json").write_text("{ 这不是 json", encoding="utf-8")
+    (_d20h / "news" / "2026-09-10.json").write_text(
+        _json20.dumps({"items": [{"guid": "太久以前"}]}), encoding="utf-8")
+    _seen20 = _nrules.recent_guids(_d20h, "2026-09-19", 3)
+    check("认 collect 形态的 items[].guid", lambda: eq("g1" in _seen20, True))
+    # 两种形态都要认：历史文件可能是 collect 写的，也可能是 analyze 写的
+    check("认 analyze 形态的 groups[].items[].guid", lambda: eq("g3" in _seen20, True))
+    check("窗口之外的老快照不参与比对", lambda: eq("太久以前" in _seen20, False))
+    # 读坏了只该"少几条可比对"，绝不能让整页消失 —— 增量标记不准是小事
+    check("坏快照跳过、不抛（顶多增量标不准，不许整页消失）",
+          lambda: eq(len(_seen20), 3))
+
+    # ---------------------------------------------------------- 源解析
+    check("_title_of：取【】里的标题",
+          lambda: eq(_nsrc._title_of("【标题在这】正文正文……"), "标题在这"))
+    check("_title_of：没有【】时退到第一句",
+          lambda: eq(_nsrc._title_of("第一句话。第二句话。"), "第一句话"))
+    check("_title_of：什么都没有 → 空串，不抛",
+          lambda: eq(_nsrc._title_of("", ""), ""))
+    check("_clean：去掉 HTML 标签", lambda: eq(_nsrc._clean("<p>你好</p><br/>世界"), "你好世界"))
+
+    _sym20 = _nsrc._sina_symbols({"ext": _json20.dumps({"stocks": [
+        {"symbol": "sh600519", "market": "cn", "key": "贵州茅台"},
+        {"symbol": "sz300750", "market": "cn", "key": "宁德时代"},
+        {"symbol": "02476", "market": "hk", "key": "胜宏科技"},
+        {"symbol": "hk03988", "market": "hk", "key": "中国银行"},
+        {"symbol": "si931071", "market": "cn", "key": "人工智能"},
+        {"symbol": "sz399975", "market": "cn", "key": "证券公司"},
+        {"symbol": "sh000300", "market": "cn", "key": "沪深300"},
+        {"symbol": "sh600519", "market": "cn", "key": "贵州茅台"},
+    ]})})
+    check("新浪标的：A 股个股留下",
+          lambda: eq([s["code"] for s in _sym20 if s["market"] == "cn"],
+                     ["600519", "300750"]))
+    # ⭐ 指数混进来会在页面上冒充"关联个股"，读者会以为这条新闻跟某只票有关
+    check("⭐ 新浪标的：`si` 前缀的指数被丢",
+          lambda: eq(any(s["code"] == "931071" for s in _sym20), False))
+    check("⭐ 新浪标的：`sz399xxx`（深证指数）被丢",
+          lambda: eq(any(s["code"] == "399975" for s in _sym20), False))
+    check("⭐ 新浪标的：`sh000xxx`（上证指数）被丢",
+          lambda: eq(any(s["code"] == "000300" for s in _sym20), False))
+    check("新浪标的：裸数字与 hk 前缀的港股两种写法都认",
+          lambda: eq([s["code"] for s in _sym20 if s["market"] == "hk"],
+                     ["02476", "03988"]))
+    check("新浪标的：同一只出现两次只留一条",
+          lambda: eq(sum(1 for s in _sym20 if s["code"] == "600519"), 1))
+    check("新浪标的：ext 坏 JSON → 空列表，不抛",
+          lambda: eq(_nsrc._sina_symbols({"ext": "不是 json"}), []))
+    check("_int：int 秒原样", lambda: eq(_nsrc._int(1758300000), 1758300000))
+    check("_int：13 位毫秒戳折成秒", lambda: eq(_nsrc._int(1758300000000), 1758300000))
+    # 新浪 create_time 是「本地时间」字符串 —— 当 UTC 处理会整体差 8 小时
+    check("_int：认 'YYYY-MM-DD HH:MM:SS'（按本地时间）",
+          lambda: eq(_nsrc._int("2026-09-19 23:06:08"),
+                     int(_dt20.strptime("2026-09-19 23:06:08",
+                                        "%Y-%m-%d %H:%M:%S").timestamp())))
+    check("_int：垃圾输入 → 0，不抛", lambda: eq(_nsrc._int("不是时间"), 0))
+    check("_is_index_code：沪 000 段是指数、深 399 段是指数",
+          lambda: eq(_nsrc._is_index_code("sh", "000300"), True)
+          and eq(_nsrc._is_index_code("sz", "399975"), True)
+          and eq(_nsrc._is_index_code("sh", "600519"), False)
+          and eq(_nsrc._is_index_code("sz", "000625"), False))
+
+    # ---------------------------------------------------------- 自选股命中（三路）
+    _wl20 = [{"secid": "1.600519", "code": "600519", "name": "贵州茅台"},
+             {"secid": "0.300750", "code": "300750", "name": "宁德时代"},
+             {"secid": "0.002594", "code": "002594", "name": "比亚迪"},
+             {"secid": "116.00700", "code": "00700", "name": "腾讯控股"},
+             {"secid": "1.601318", "code": "601318", "name": "中国平安"}]
+
+    def _hit20(**kw):
+        item = {"title": "", "text": "", "symbols": [], "hit": []}
+        item.update(kw)
+        return _nmodobj._watch_hits(item, _wl20)
+
+    check("① 源自带的关联标的命中（最硬的信号）",
+          lambda: eq([h["code"] for h in _hit20(
+              symbols=[{"market": "cn", "code": "600519", "name": "贵州茅台"}])], ["600519"]))
+    check("① 港股标的走 116. 市场号",
+          lambda: eq([h["secid"] for h in _hit20(
+              symbols=[{"market": "hk", "code": "00700", "name": "腾讯控股"}])], ["116.00700"]))
+    check("① 不在名单里的标的不会命中",
+          lambda: eq(_hit20(symbols=[{"market": "cn", "code": "300476", "name": "胜宏科技"}]), []))
+    check("② 正文里的 6 位代码命中",
+          lambda: eq([h["code"] for h in _hit20(text="300750 今日公告")], ["300750"]))
+    check("③ 三个字的名字命中（NAME_MATCH_MIN 的边界）",
+          lambda: eq([h["code"] for h in _hit20(title="比亚迪海外销量创新高")], ["002594"]))
+    check("③ 四个字的名字也命中",
+          lambda: eq([h["code"] for h in _hit20(title="中国平安发布公告")], ["601318"]))
+    # ⭐ 两字名不做文本匹配：「平安」「中国」「东方」在财经新闻里到处都是，
+    #    撞上就报"和你的自选股有关"是**假信号**，比漏掉更糟（用户会开始不信这个页面）
+    check("⭐ 两字名不做文本匹配（「平安银行」不许命中中国平安）",
+          lambda: eq(_hit20(title="平安银行发布公告"), []))
+    # ⭐ 长数字串里不许切出假的 6 位码（订单号/流水号常是 12 位以上）
+    check("⭐⭐ 长数字串里不许切出假 6 位码",
+          lambda: eq(_hit20(text="订单号 6005190000123 已受理"), []))
+    check("三路同时命中同一只 → 只算一条（不重复标）",
+          lambda: eq([h["code"] for h in _hit20(
+              title="宁德时代", text="300750 宁德时代 公告",
+              symbols=[{"market": "cn", "code": "300750", "name": "宁德时代"}])], ["300750"]))
+    # 顺序必须是稳定的：页面每次渲染都一样，不能今天一个顺序明天一个
+    check("命中列表顺序稳定（按名字，不随字典序漂）", lambda: eq(
+        (lambda got: eq(got, sorted(got)))([h["name"] for h in _hit20(
+            text="600519 300750 002594 都提到了")]), True))
+    check("空名单 → 无命中，不抛", lambda: eq(_nmodobj._watch_hits(
+        {"title": "贵州茅台", "text": "", "symbols": []}, []), []))
+
+    # ---------------------------------------------------------- 附带标的 / 来源归一
+    _ex20 = _nmodobj._extra_symbols({"symbols": [
+        {"market": "cn", "code": "600519", "name": "贵州茅台"},
+        {"market": "cn", "code": "300476", "name": "胜宏科技"}],
+        "hit": [{"secid": "1.600519", "code": "600519", "name": "贵州茅台"}]})
+    # 页面上出现「自选 · 贵州茅台」再紧跟一个「贵州茅台」会让人以为哪里错了
+    check("⭐ extra_symbols 排除已命中的自选股（不重复标）",
+          lambda: eq([s["name"] for s in _ex20], ["胜宏科技"]))
+    check("extra_symbols 最多两个（它不是第二个列表）",
+          lambda: eq(len(_nmodobj._extra_symbols({"symbols": [
+              {"market": "cn", "code": f"30000{i}", "name": f"名{i}"}
+              for i in range(4)], "hit": []})), 2))
+    check("extra_symbols 跳过没有名字的",
+          lambda: eq(_nmodobj._extra_symbols({"symbols": [
+              {"market": "cn", "code": "300001", "name": ""}], "hit": []}), []))
+    # ⭐ 条目上同时有 sources（内部键 wscn/sina）和 src_labels（展示名）。
+    #    两边都往计数里塞 → 同一个源被算两次，页面出现「新浪财经 100 · 新浪财经 100」
+    check("⭐ 来源计数不重复（内部键与展示名归一成一个）",
+          lambda: eq(_nmodobj._src_set({"sources": ["wscn"],
+                                        "src_labels": ["华尔街见闻"]}), {"华尔街见闻"}))
+    check("来源计数：两个源算两个",
+          lambda: eq(_nmodobj._src_set({"sources": ["wscn", "sina"],
+                                        "src_labels": ["华尔街见闻", "新浪财经"]}),
+                     {"华尔街见闻", "新浪财经"}))
+    check("未知内部键原样留着（将来加源别被吃掉）",
+          lambda: eq(_nmodobj._src_set({"sources": ["newsrc"], "src_labels": []}),
+                     {"newsrc"}))
+    check("_secid_of_symbol：不认的形态 → 空串（调用方据此跳过）",
+          lambda: eq(_nmodobj._secid_of_symbol({"market": "us", "code": "AAPL"}), ""))
+
+    # ⭐ secid 规则和 watchlist 模块是**两份实现**（模块目录不是包，import 不了）。
+    #    漂了的话：新闻里的自选股命中跟自选股页面的行情会对不上同一只票。
+    #    这条断言就是那份"两份实现必须一致"的兜底。
+    _wlsrc20 = _ls20(str(cfg.modules_dir / "watchlist" / "sources.py"), "sources")
+    for _c20 in ("600519", "000001", "002594", "300750", "601318", "688981", "900901"):
+        check(f"secid 规则与 watchlist 一致：{_c20}", (lambda c: (lambda: eq(
+            _nmodobj._secid_of_cn(c), _wlsrc20.guess_secid(c))))(_c20))
+
+    # ---------------------------------------------------------- analyze（真实跑一遍）
+    # 从**源形状**的条目出发，走真实的 merge → 命中 → 分组 → 裁剪，
+    # 等价于一次没有网络的 collect。这样测到的是生产路径，不是另写一套。
+    def _mk20(src, sid, title, text, syms=None, tags=None, ts=0, label=""):
+        return {"src": src, "sid": f"{src}:{sid}", "title": title, "text": text,
+                "url": "", "ts": ts, "tags": tags or [], "symbols": syms or [],
+                "src_label": label}
+
+    _ring20 = [
+        _mk20("wscn", "1", "贵州茅台三季度净利同比增长 15%", "公司业绩公告",
+              syms=[{"market": "cn", "code": "600519", "name": "贵州茅台"},
+                    {"market": "cn", "code": "300476", "name": "胜宏科技"}],
+              tags=["A股"], ts=1758300000, label="华尔街见闻"),
+        _mk20("sina", "2", "宁德时代发布新一代电池", "300750 今日公告",
+              tags=["公司"], ts=1758300100, label="新浪财经"),
+        _mk20("sina", "3", "比亚迪海外销量创新高", "", tags=["公司"],
+              ts=1758300200, label="新浪财经"),
+        _mk20("sina", "4", "平安银行发布公告", "", ts=1758300300, label="新浪财经"),
+        _mk20("wscn", "5", "美联储官员称通胀仍高", "市场预计加息",
+              tags=["全球"], ts=1758300400, label="华尔街见闻"),
+        _mk20("wscn", "6", "美联储加息，公司业绩承压", "", ts=1758300500,
+              label="华尔街见闻"),
+        _mk20("wscn", "7", "沪指午后翻红", "成交额放大", ts=1758300600, label="华尔街见闻"),
+        _mk20("wscn", "8", "央行开展逆回购操作", "", ts=1758300700, label="华尔街见闻"),
+    ]
+    # 12 条什么都不沾的 → 全进「未归类」，用来验上限（默认只放很少几条，
+    # 不然整页的重点会被国际/社会新闻冲掉）
+    for _i20 in range(12):
+        _ring20.append(_mk20("sina", f"u{_i20}", f"名古屋亚运会第{_i20}场赛程公布", "",
+                             ts=1758301000 + _i20, label="新浪财经"))
+
+    _merged20, _ded20 = _nrules.merge(_ring20)
+    for _it20 in _merged20:
+        _h20 = _nmodobj._watch_hits(_it20, _wl20)
+        _blob20 = f"{_it20.get('title')} {_it20.get('text')}"
+        _it20["hit"] = _h20
+        _it20["group"] = (_nmodobj.WATCH_GROUP if _h20
+                          else _nrules.classify(_blob20, _dg20))
+        _it20["fresh"] = True
+        _it20["time"] = _nmodobj._hhmm(_it20.get("ts"))
+        _it20["ts_text"] = _nmodobj._ts_text(_it20.get("ts"))
+    _raw20 = {
+        "fetched_at": "2026-09-19T23:00:00", "errors": {}, "source_stats": {},
+        "raw_count": len(_ring20), "dedup": _ded20, "rules_source": "内置默认",
+        "group_meta": [g.to_meta() for g in _dg20],
+        "watchlist": _wl20, "watchlist_updated_at": "2026-09-19T22:21:07",
+        "seen_before": 0, "fresh_count": len(_merged20),
+        "watch_count": sum(1 for i in _merged20 if i["hit"]),
+        "items": [_nmodobj._trim(i) for i in _merged20],
+    }
+    check("合成数据的原始条数", lambda: eq(len(_ring20), 20))
+
+    _d20 = _Path20(_tf20.mkdtemp(prefix="radar20_"))
+
+    class _NCtx20:
+        date = "2026-09-19"
+        public_dir = _d20 / "public"
+        http = None
+        log = None
+        data_dir = _d20
+        config = cfg
+
+        def log_info(self, msg):
+            pass
+
+    # ⚠️ 大模型这一段必须"不可能联网"：key 指向一个**不存在**的环境变量。
+    #    否则冒烟会真的花钱（而且 CI 上根本 review 不出来）。
+    _cfg20 = load(ROOT)
+    _cfg20["llm"] = dict(_cfg20.section("llm") or {},
+                         enabled=False, api_key_env="RADAR_SMOKE_NO_SUCH_KEY")
+    _NCtx20.config = _cfg20
+
+    _ndata20 = _nmod.analyze(_raw20, _NCtx20())
+    _g20out = _ndata20["groups"]
+    check("analyze：出了分组", lambda: eq(bool(_g20out), True))
+    check("⭐ 自选股组排在最前面",
+          lambda: eq(_g20out[0]["name"], _nmodobj.WATCH_GROUP))
+    check("⭐ 未归类永远垫底",
+          lambda: eq(_g20out[-1]["name"], _nrules.FALLBACK_GROUP))
+    check("自选股组命中 3 条（源自带标的 / 正文代码 / 名字，三条路各一条）",
+          lambda: eq(_g20out[0]["count"], 3))
+    check("⭐ 未归类被限到 8 条（默认几十条会把整页重点冲掉）",
+          lambda: eq(_g20out[-1]["shown"], 8))
+    # 上限这条断言要能失败得有意义：如果构造的数据本来就不超过上限，
+    # 上面那条是在**空转**（永远绿）—— 所以这里显式要求它确实超了。
+    check("未归类确实多于上限（否则上一句是空转的）",
+          lambda: eq(_g20out[-1]["count"] > _g20out[-1]["shown"], True))
+    check("stats.watch = 命中条数", lambda: eq(_ndata20["stats"]["watch"], 3))
+    check("stats.total = 全部条目", lambda: eq(_ndata20["stats"]["total"], 20))
+    # 名单里有、今天没消息的标的也要露面 ——「没有消息」本身是信息
+    check("watch_hits：名单五只全露面（含今天零消息的）",
+          lambda: eq(len(_ndata20["watch_hits"]), 5))
+    check("watch_hits：按条数倒序，零条的垫底",
+          lambda: eq(_ndata20["watch_hits"][-1]["count"], 0)
+          and eq(_ndata20["watch_hits"][0]["count"] >= 1, True))
+    check("watch_hits：零条的也给 name（不许只剩一个代码）",
+          lambda: eq(all(bool(h.get("name")) for h in _ndata20["watch_hits"]), True))
+    check("来源计数只出现两个源、无重复",
+          lambda: eq(sorted(s["name"] for s in _ndata20["stats"]["sources"]),
+                     ["华尔街见闻", "新浪财经"]))
+    check("by_hour 长 24（首页迷你折线靠它）",
+          lambda: eq(len(_ndata20["by_hour"]), 24))
+    check("导读在 key 不可用时降级成空串（页面照常）",
+          lambda: eq(_ndata20["digest"], ""))
+    check("空数据 analyze 不炸",
+          lambda: eq(_nmod.analyze({"items": []}, _NCtx20())["empty"], True))
+    # ⭐ 整站铁律：跨日期状态必须在 collect 定下来。
+    #    analyze 里一旦出现读历史/读 data 目录，半年后重建旧页面就会跟着变。
+    _ac20 = __import__("inspect").getsource(_nmod.analyze)
+    check("⭐ analyze 不读历史快照（跨日期状态必须已在 collect 定下）",
+          lambda: eq("recent_guids" in _ac20, False)
+          and eq("data_dir" in _ac20, False))
+    _nsrc_text20 = (_nd / "module.py").read_text(encoding="utf-8")
+    # 模块**不许**直接往 public 写东西：页面一律由 `radar build` 生成，
+    # 绕过它就会出现"改代码→页面没变"这种查半天的问题
+    check("⭐ 模块不直接写 public（页面只能由 build 生成）",
+          lambda: eq("public_dir" in _nsrc_text20, False))
+
+    # ---------------------------------------------------------- report / 产物
+    _nrep20 = _nmod.report(_ndata20, _NCtx20())
+    for _n20 in ("## 相关新闻", "今日导读", "未归类", "不构成任何投资建议"):
+        if _n20 == "今日导读":
+            continue          # 没 key 时本来就没有导读，别写死
+        check(f"report 含 {_n20}", (lambda n: (lambda: has(n, _nrep20)))(_n20))
+    check("report 空数据不炸", lambda: _nmod.report(
+        {"stats": {}, "groups": [], "empty": True}, _NCtx20()))
+
+    # 模板渲染成真 HTML —— Jinja 的 `data.items` 会命中 dict 的 .items() 方法
+    # 而不是同名的键，这类错光看代码看不出来，必须真渲染一遍
+    if HAVE_JINJA:
+        from radar.core import render as render_mod
+
+        store.write_json(_d20 / "news" / "2026-09-19.json", _ndata20)
+        store.write_text(_d20 / "news" / "2026-09-19.md", _nrep20)
+        _cfgT20 = load(ROOT)
+        _cfgT20["storage"] = dict(_cfgT20["storage"])
+        _cfgT20["storage"]["data_dir"] = str(_d20)
+        _cfgT20["storage"]["public_dir"] = str(_d20 / "public")
+        store.save_index(_d20, store.build_index(
+            _d20, [m.meta() for m in registry.ordered(found)]))
+        render_mod.build_site(_cfgT20, _cfgT20.section("app"),
+                              registry.ordered(found), log=lambda m: None)
+        _np20 = _d20 / "public" / "news" / "index.html"
+        check("产物有 /news/ 页", lambda: eq(_np20.is_file(), True))
+        _nh20 = _np20.read_text(encoding="utf-8") if _np20.is_file() else ""
+        for _n20 in ("相关新闻", "我的自选股", "按主题分组", 'class="news-nav"',
+                     "自选 · 贵州茅台", "未归类", "只认三个字以上的名字",
+                     "胜宏科技"):
+            check(f"新闻页含 {_n20}", (lambda n: (lambda: has(n, _nh20)))(_n20))
+        check("首页卡片指向 /news/",
+              lambda: has('href="/news/"',
+                          (_d20 / "public" / "index.html").read_text(encoding="utf-8")))
+        # 内部频道 key（xgb-channel 这类）不该出现在页面上 —— 它没告诉读者任何事，
+        # 只会让人以为界面坏了
+        check("⭐ 页面不暴露内部频道 key",
+              lambda: eq("xgb-channel" in _nh20, False))
+    else:
+        print("  [skip] 没装 jinja2，跳过新闻页渲染")
+
+    # ⭐ 块级元素绝不能包进 <p>：浏览器会**静默截断**，页面看着还正常。
+    #    这条只能靠断言守（肉眼 review 一百遍也看不出来）。
+    def _no_block_in_p20(text):
+        for m in re.finditer(r"<p\b[^>]*>(.*?)</p>", text, re.S):
+            if re.search(r"<(div|section|ul|ol|li|table|figure|nav|article|aside)\b",
+                         m.group(1)):
+                raise AssertionError(f"<p> 里包了块级元素：{m.group(1)[:120]!r}")
+        return True
+
+    check("⭐ news 模板没有把块级元素包进 <p>（浏览器会静默截断）",
+          lambda: _no_block_in_p20((_nd / "template.html").read_text(encoding="utf-8")))
+
+    # ---------------------------------------------------------- 接线 / 文档
+    check("config.json 里有 news 模块配置",
+          lambda: eq(bool(cfg.module_cfg("news")), True))
+    check("config 含 per_channel", lambda: eq(cfg.module_cfg("news").get("per_channel"), 30))
+    check("⭐ config 含 unclassified_limit（未归类必须有个小上限）",
+          lambda: eq(cfg.module_cfg("news").get("unclassified_limit"), 8))
+    # 顶栏/底栏都是按模块清单**循环**生成的（`href="/{{ item.name }}/"`），
+    # 所以 base.html 里查不到字面量 `/news/` —— 要查的是"news 有图标分支"，
+    # 字面链接则由下面渲染出来的产物页去证明。
+    _base20 = (ROOT / "radar" / "templates" / "base.html").read_text(encoding="utf-8")
+    check("底栏给 news 配了图标分支（否则会掉进通用方格）",
+          lambda: has("item.name == 'news'", _base20))
+    check("导航循环按模块清单生成（不是写死的链接）",
+          lambda: has('href="/{{ item.name }}/"', _base20))
+    if HAVE_JINJA:
+        check("产物底栏里有 /news/ 入口",
+              lambda: has('href="/news/"',
+                          (_d20 / "public" / "news" / "index.html").read_text(
+                              encoding="utf-8")))
+    check("store 给 news 算首页 hero",
+          lambda: has('elif name == "news"',
+                      (ROOT / "radar" / "core" / "store.py").read_text(encoding="utf-8")))
+    check("样式含 .news-item",
+          lambda: has(".news-item {",
+                      (ROOT / "radar" / "static" / "style.css").read_text(encoding="utf-8")))
+    check("README 记录了相关新闻", lambda: has("相关新闻",
+        (ROOT / "README.md").read_text(encoding="utf-8")))
+except Exception as exc:  # noqa: BLE001
+    import traceback
+    print("  [!!] 新闻检查抛异常：")
+    print(traceback.format_exc())
+    FAILED.append("news")
 
 print("\n" + "=" * 52)
 if FAILED:
