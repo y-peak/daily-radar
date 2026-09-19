@@ -2010,6 +2010,149 @@ except Exception as exc:  # noqa: BLE001
     print(traceback.format_exc())
     FAILED.append("settings")
 
+# ==================================================== 16. 个人规划弹窗（App 内）
+# 和数据有关的模块，这里最该守住的不是"功能在不在"，而是三条**静默失效**：
+#   ① 改动只进了内存、没落盘 → 关掉面板数据就没了，而界面上一切正常
+#   ② 落盘**失败却装作成功** → 用户以为记下了，其实没写进去
+#   ③ 用户在浏览器里看到一堆输入框，存到哪儿都不知道
+# 前两条靠 tools/plans_probe.mjs 真跑浏览器验（它会断言"关掉再打开内容还在"
+# 以及"存失败时页面上看得见"）。这里做静态检查，保证结构、桥、防护都在位。
+print("\n== 16. 个人规划弹窗（本地存储）==")
+try:
+    _base2 = (ROOT / "radar/templates/base.html").read_text(encoding="utf-8")
+    _js2 = (ROOT / "radar/static/app.js").read_text(encoding="utf-8")
+    _java = (ROOT / "app/android/java/com/ypeak/radar/MainActivity.java").read_text(encoding="utf-8")
+    _css = (ROOT / "radar/static/style.css").read_text(encoding="utf-8")
+    _idx = ROOT / "public/index.html"
+
+    # --- 页面结构：入口 + 弹窗骨架 ---
+    check("底部口径：弹窗入口存在", lambda: has('id="plans-btn"', _base2))
+    check("入口默认隐藏（无 JS 时不出现）", lambda: has('id="plans-btn" class="icon-btn"', _base2)
+          and has('aria-label="我的规划"', _base2))
+    check("弹窗存在且默认隐藏", lambda: has('id="plans-modal"', _base2)
+          and has('id="plans-modal" class="plans-modal" hidden', _base2))
+    for _id in ("plans-note", "plans-web", "plans-app", "plan-form", "plan-title",
+                "plan-due", "plan-memo", "plan-add", "plan-count",
+                "plan-hide-done", "plan-empty", "plan-list",
+                "plan-undo", "plan-undo-txt", "plan-undo-btn"):
+        check(f"弹窗含 #{_id}", (lambda i: (lambda: has(f'id="{i}"', _base2)))(_id))
+    check("App 分支与浏览器分支**都默认隐藏**",
+          lambda: has('id="plans-web" class="plans-web" hidden', _base2)
+          and has('id="plans-app" hidden', _base2))
+    check("有关闭用句柄（遮罩与 × 各一）",
+          lambda: eq(_base2.count("data-plans-close"), 2))
+    # 弹窗不该被"点标题折叠"误伤 —— 点了标题把弹窗收起来，像功能消失
+    check("弹窗卡片豁免折叠", lambda: has("data-no-collapse", _base2))
+    check("如实说明只在 App 内可用",
+          lambda: has("这个面板只在安卓 App 里可用", _base2))
+
+    # ⭐ 空壳：弹窗里**不能有任何服务端注入的值**。
+    #    一旦注入了，就说明数据被写进了 HTML —— 而它是"只存手机本地"的东西。
+    _i0 = _base2.index('id="plans-modal"')
+    _i1 = _base2.index('id="toast"')
+    _modal_src = _base2[_i0:_i1]
+    check("⭐ 弹窗是纯空壳：没有任何服务端注入的值",
+          lambda: eq("{{" in _modal_src, False))
+
+    # --- 前端接线 ---
+    check("app.js 有 setupPlans", lambda: has("function setupPlans()", _js2))
+    check("app.js 启动了 setupPlans", lambda: has("setupPlans();", _js2))
+    check("从原生桥读规划", lambda: has("native.getPlans()", _js2))
+    check("写回原生桥", lambda: has("native.setPlans(", _js2))
+
+    # ⭐ 落盘失败必须**可见**：这是本项目最在意的一条（不许安静地失败）
+    check("⭐ 保存失败会写进状态条，而不是静默吞掉",
+          lambda: has("没有存进手机", _js2) and has("is-warn", _js2))
+    check("⭐ 每次改动都立刻落盘（add/toggle/remove 都调 save）",
+          lambda: eq(_js2.count("save();"), 4))
+
+    # ⭐ 用户输入绝不当 HTML 渲染
+    check("⭐ 标题走 textContent 而不是 innerHTML",
+          lambda: has("t.textContent = it.t", _js2)
+          and eq("innerHTML" in _js2, False))
+
+    # ⭐ WebView 里 window.confirm 默认不弹（直接返回 false），拿它做确认
+    #    会变成"点了删除没反应"。改成"立刻删 + 撤销"。
+    check("⭐ 不用 window.confirm 做删除确认",
+          lambda: eq("confirm(" in _js2, False))
+    check("删除后给撤销机会", lambda: has("showUndo", _js2)
+          and has("setTimeout(dropUndo, 6000)", _js2))
+
+    # ⭐ 日期必须按**本地时区**算：toISOString() 是 UTC，东八区凌晨 0-8 点
+    #    算出来的"今天"其实是昨天，逾期判断会反向出错。
+    check("⭐ 今天按本地时区算，不是 UTC",
+          lambda: has("d.getFullYear()", _js2) and eq("toISOString().slice(0, 10)" in _js2, False))
+
+    check("遮罩点关闭", lambda: has("[data-plans-close]", _js2))
+    check("Esc 能关闭", lambda: has('"Escape"', _js2))
+    check("打开时锁住背景滚动", lambda: has("plans-open", _js2) and has("body.plans-open", _css))
+
+    # --- 安卓侧：本地存储 ---
+    check("桥有 getPlans", lambda: has("public String getPlans()", _java))
+    check("桥有 setPlans", lambda: has("public boolean setPlans(String json)", _java))
+    check("用 SharedPreferences 持久化",
+          lambda: has('PREF_PLANS = "plans_json"', _java))
+    check("⭐ 用 commit() 而不是 apply()：拿得到真实结果",
+          lambda: has(".commit()", _java))
+    check("有落盘上限", lambda: has("PLANS_MAX_BYTES", _java))
+    check("⭐ 超上限返回 false，而不是静默截断",
+          lambda: has("> PLANS_MAX_BYTES) return false", _java))
+    check("按 UTF-8 字节算大小（中文一个字 3 字节）",
+          lambda: has("StandardCharsets.UTF_8", _java))
+    # ⚠️ 桥方法要读 prefs，而页面在注册桥之后随时可能调用 —— prefs 必须先就绪
+    check("⭐ prefs 在注册桥之前初始化（防时序 NPE）",
+          lambda: _java.index("prefs = getSharedPreferences")
+          < _java.index('addJavascriptInterface(new NativeBridge()'))
+
+    # --- 样式 ---
+    _c0 = _css.index("33. 个人规划弹窗")
+    _css33 = _css[_c0:]
+    check("样式含第 33 节", lambda: has(".plans-card", _css33))
+    check("⭐ 滚动区有 min-height:0（不然列表长了不出现滚动条）",
+          lambda: has("min-height: 0", _css33))
+    check("⭐ 输入框字号 16px（低于它手机会自动放大页面）",
+          lambda: has("font-size: var(--fs-md)", _css33))
+    # 红色在本站是"涨"，拿它当删除/逾期色会和行情语义打架
+    check("逾期用琥珀而不是红色",
+          lambda: has(".plan-date.is-overdue { color: var(--warn)", _css33))
+    check("删除悬停也不使用涨跌红",
+          lambda: eq("--up" in _css33, False))
+
+    # --- 构建产物 ---
+    check("public/index.html 已生成", lambda: eq(_idx.is_file(), True))
+    if _idx.is_file():
+        _ih = _idx.read_text(encoding="utf-8")
+        check("产物含弹窗骨架", lambda: has('id="plans-modal"', _ih))
+        check("产物含入口按钮", lambda: has('id="plans-btn"', _ih))
+        check("产物含浏览器说明卡文案",
+              lambda: has("这个面板只在安卓 App 里可用", _ih))
+    check("产物样式含第 33 节",
+          lambda: has("33. 个人规划弹窗",
+                      (ROOT / "public/static/style.css").read_text(encoding="utf-8")))
+    check("产物脚本含 setupPlans",
+          lambda: has("setupPlans",
+                      (ROOT / "public/static/app.js").read_text(encoding="utf-8")))
+
+    # --- 探针脚本 ---
+    check("tools/plans_probe.mjs 存在",
+          lambda: eq((ROOT / "tools/plans_probe.mjs").is_file(), True))
+    _probe2 = (ROOT / "tools/plans_probe.mjs").read_text(encoding="utf-8")
+    # 光有探针不够：它必须真的在验"落盘"和"存失败看得见"，否则只是点了个按钮
+    check("⭐ 探针验了「关掉再打开内容还在」", lambda: has("重开后内容还在", _probe2))
+    check("⭐ 探针验了「存失败时页面上看得见」", lambda: has("存失败时状态条露出来", _probe2))
+    check("⭐ 探针验了「用户输入不会被当 HTML 执行」", lambda: has("__xss", _probe2))
+    check("探针带无桥分支", lambda: has("NO_BRIDGE", _probe2))
+
+    # --- 文档 ---
+    _readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    check("README 记录了规划面板", lambda: has("个人规划", _readme))
+    check("README 说明了数据不上服务器", lambda: has("不上服务器", _readme))
+except Exception as exc:  # noqa: BLE001
+    import traceback
+    print("  [!!] 规划面板检查抛异常：")
+    print(traceback.format_exc())
+    FAILED.append("plans")
+
 print("\n" + "=" * 52)
 if FAILED:
     print(f"失败 {len(FAILED)} 项：{FAILED}")

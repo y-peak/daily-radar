@@ -2223,3 +2223,355 @@ pre.json {
   font-weight: 600;
   vertical-align: 1px;
 }
+
+/* ============================================================================
+   33. 个人规划弹窗（App 内）
+   ----------------------------------------------------------------------------
+   做成"盖在页面上的浮层"而不是新页面：规划是随手记一笔的动作，跳页会丢掉
+   当前位置（尤其正读到某章的时候）。
+
+   结构：
+     .plans-modal            固定层（遮罩 + 卡片），默认 [hidden]
+       .plans-veil           点它关闭
+       .plans-card           role=dialog
+         .plans-head         标题 + 关闭
+         #plans-note         状态条 —— 放在滚动区**外面**，警告不能滚丢
+         .plans-body         滚动区
+           #plans-web        浏览器分支：只解释，不放控件
+           #plans-app        App 分支：表单 + 列表 + 撤销条
+
+   层叠 45：要盖住粘性顶栏(30)，但必须在 toast(50) **之下** ——
+   反过来弹窗里触发的提示会被自己盖住，等于没提示。
+
+   文案与交互的细节全在 app.js 的 setupPlans()。
+   ============================================================================ */
+.plans-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 45;
+  display: flex;
+  /* 手机上从底部升起（拇指区），桌面端居中 */
+  align-items: flex-end;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity var(--dur) var(--ease-out);
+}
+.plans-modal.is-in { opacity: 1; }
+
+.plans-veil {
+  position: absolute;
+  inset: 0;
+  background: rgba(15, 20, 25, 0.45);
+  -webkit-tap-highlight-color: transparent;
+}
+
+.plans-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 560px;
+  max-height: 88vh;
+  background: var(--surface);
+  border-radius: var(--r-lg) var(--r-lg) 0 0;
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+  transform: translateY(14px);
+  transition: transform var(--dur-slow) var(--ease-out);
+}
+.plans-modal.is-in .plans-card { transform: translateY(0); }
+
+.plans-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding: var(--sp-4) var(--sp-4) var(--sp-2);
+}
+.plans-head h2 {
+  margin: 0;
+  font-size: var(--fs-lg);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+.plans-x {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  margin: -10px -10px -10px 0;   /* 视觉上贴角，但点击区仍是 40px */
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: var(--r-full);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 26px;
+  line-height: 1;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: background var(--dur-fast) var(--ease-out);
+}
+.plans-x:hover  { background: var(--hover); }
+.plans-x:active { transform: scale(.94); }
+
+.plans-body {
+  flex: 1 1 auto;
+  /* ⭐ min-height:0 不能省 —— flex 子项默认 min-height:auto，
+     内容一多它就不肯收缩，overflow 永远不生效、滚动条压根不出现，
+     表现是"列表长到撑破卡片、底部按钮看不见"。 */
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 0 var(--sp-4) calc(var(--sp-4) + env(safe-area-inset-bottom));
+}
+
+/* 状态条：保存失败 / 达到条数上限这类"必须让你知道"的事。
+   默认中性，由 app.js 加类。 */
+.plans-note {
+  flex: none;
+  margin: 0 var(--sp-4) var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-xs);
+  background: var(--surface-2);
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  line-height: 1.55;
+}
+.plans-note.is-warn { background: var(--warn-dim); color: var(--warn); }
+.plans-note.is-ok   { background: var(--down-dim); color: var(--down); }
+
+/* 浏览器分支的说明卡 —— 与设置页"仅 App 内可用"同一套语气 */
+.plans-web {
+  padding: var(--sp-4);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  line-height: 1.75;
+}
+.plans-web p            { margin: 0 0 var(--sp-2); }
+.plans-web p:last-child { margin-bottom: 0; }
+.plans-web strong       { color: var(--text); }
+
+/* ---- 新增表单 ---- */
+.plan-form { display: grid; gap: var(--sp-2); }
+
+.plan-input,
+.plan-due {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px var(--sp-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--text);
+  /* ⭐ 16px：低于它，iOS 与部分安卓会在聚焦时自动放大页面，弹窗位置就乱了 */
+  font-size: var(--fs-md);
+  font-family: inherit;
+  -webkit-appearance: none;
+  transition: border-color var(--dur-fast) var(--ease-out),
+              box-shadow var(--dur-fast) var(--ease-out);
+}
+.plan-input:focus,
+.plan-due:focus {
+  outline: none;
+  border-color: var(--brand);
+  box-shadow: 0 0 0 3px var(--brand-glow);
+}
+.plan-input::placeholder { color: var(--text-faint); }
+
+.plan-row { display: flex; gap: var(--sp-2); }
+.plan-due { flex: 0 1 150px; min-width: 0; }
+.plan-row .plan-input { flex: 1 1 0; min-width: 0; }
+
+.plan-add {
+  margin-top: var(--sp-1);
+  min-height: 44px;              /* 拇指友好 —— 别做小按钮 */
+  border: 1px solid var(--brand);
+  border-radius: var(--r-sm);
+  background: var(--brand);
+  color: #fff;
+  font-size: var(--fs-md);
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out),
+              transform var(--dur-fast) var(--ease-out);
+}
+.plan-add:hover  { background: var(--brand-deep); border-color: var(--brand-deep); }
+.plan-add:active { transform: scale(.985); }
+
+.plan-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  margin: var(--sp-4) 0 var(--sp-2);
+  font-size: var(--fs-sm);
+  color: var(--text-faint);
+}
+.plan-count { font-variant-numeric: tabular-nums; }
+
+/* 文字型按钮（隐藏已完成 / 撤销）：不给边框，免得和主按钮抢注意力 */
+.plan-linkish {
+  padding: var(--sp-1) 0;
+  border: 0;
+  background: none;
+  color: var(--brand);
+  font-size: inherit;
+  font-family: inherit;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.plan-linkish:active { opacity: .6; }
+
+.plan-empty {
+  margin: 0;
+  padding: var(--sp-5) var(--sp-4);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--r-sm);
+  color: var(--text-faint);
+  font-size: var(--fs-sm);
+  line-height: 1.6;
+  text-align: center;
+}
+
+/* ---- 列表 ---- */
+.plan-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--sp-2);
+}
+
+.plan-item {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  padding: 10px var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  transition: border-color var(--dur-fast) var(--ease-out),
+              background var(--dur-fast) var(--ease-out);
+}
+.plan-item:hover { border-color: var(--border-strong); }
+
+/* 完成态：整条退到背景里，但**不隐藏** —— 划掉的事本身是正反馈 */
+.plan-item.is-done { background: var(--surface-2); }
+.plan-item.is-done .plan-t {
+  color: var(--text-faint);
+  text-decoration: line-through;
+  text-decoration-color: var(--text-faint);
+}
+.plan-item.is-done .plan-sub { opacity: .75; }
+
+/* 完成勾：用 border-radius 画圈，勾用 ::after 的内容，
+   而不是塞一段 SVG —— 一个字符就够，别为它多一段标记 */
+.plan-check {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  margin-top: 1px;
+  display: grid;
+  place-items: center;
+  border: 1.6px solid var(--border-strong);
+  border-radius: var(--r-full);
+  background: transparent;
+  color: transparent;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: background var(--dur-fast) var(--ease-out),
+              border-color var(--dur-fast) var(--ease-out),
+              transform var(--dur-fast) var(--ease-out);
+}
+.plan-check::after { content: "✓"; }
+.plan-item.is-done .plan-check {
+  background: var(--down);
+  border-color: var(--down);
+  color: #fff;
+}
+.plan-check:active { transform: scale(.9); }
+
+/* ⭐ min-width:0 —— flex 子项默认 min-width:auto，长标题不会换行，
+   而是把整行撑破、把右边的删除按钮挤出去。折叠态好 ≠ 长内容时也好。 */
+.plan-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.plan-t {
+  display: block;
+  color: var(--text);
+  font-size: var(--fs-base);
+  line-height: 1.45;
+  overflow-wrap: anywhere;       /* 长英文/URL 也不撑破 */
+}
+.plan-sub {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin-top: 3px;
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+}
+.plan-sub .plan-date { font-variant-numeric: tabular-nums; }
+/* 逾期用 --warn（琥珀）：本项目的红色是"涨"，拿它当警示会和行情语义打架 */
+.plan-sub .plan-date.is-overdue { color: var(--warn); font-weight: 600; }
+
+.plan-del {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  margin: -4px -6px -4px 0;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: var(--r-full);
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 19px;
+  line-height: 1;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: background var(--dur-fast) var(--ease-out),
+              color var(--dur-fast) var(--ease-out);
+}
+/* 悬停只做中性加深，**不用红色** —— 红色在这个站里是"上涨"，
+   当删除色会和行情语义撞车（同样原因，逾期也用琥珀而不是红）。 */
+.plan-del:hover { background: var(--surface-3); color: var(--text); }
+
+.plan-undo {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  margin-top: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+}
+
+/* 弹窗打开时锁住背景滚动 —— 否则手指一滑就滚到底下的仪表盘去了 */
+body.plans-open { overflow: hidden; }
+
+@media (min-width: 720px) {
+  .plans-modal { align-items: center; padding: var(--sp-6); }
+  .plans-card  { border-radius: var(--r-lg); max-height: 80vh; }
+  .plans-body  { padding-bottom: var(--sp-4); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .plans-modal,
+  .plans-card { transition: none; }
+  .plans-card { transform: none; }
+}

@@ -185,12 +185,12 @@ cd app/android
   不验就会把截断的包丢给安装器，报出"解析包时出现问题"这种莫名其妙的错
 
 > `/api/app` 的版本元数据来自构建时落下的 sidecar JSON —— `versionCode` **不在文件名里**，
-> 光看 `radar-1.5.apk` 只能拿到 versionName。sidecar 缺失时 `versionCode` 退化为 **0**，
+> 光看 `radar-1.6.apk` 只能拿到 versionName。sidecar 缺失时 `versionCode` 退化为 **0**，
 > 方向是安全的（App 侧判据是"服务器 > 本地才提示"，0 只会导致不提示，不会误报）。
 >
-> `url` 字段给的是**具体那个文件**（`/dl/radar-1.5.apk`），不是 `/app` 别名。
+> `url` 字段给的是**具体那个文件**（`/dl/radar-1.6.apk`），不是 `/app` 别名。
 > 别名每次请求都重新挑"最新的包"，而 App 是"先问版本、再下载"两次请求 ——
-> 中间刚好传了新包，App 就会拿 v1.5 的版本号去下 v1.6 的包，
+> 中间刚好传了新包，App 就会拿 v1.6 的版本号去下 v1.7 的包，
 > 表现为"更新完还提示有新版"，自相矛盾且极难复现。
 
 ### 下载入口
@@ -199,7 +199,7 @@ cd app/android
 |---|---|
 | `/app` | **短链**（推荐，手机上好敲）：`https://118.196.100.121/app?t=<口令>` |
 | `/dl/latest.apk` | 同上，`latest` 挑的是**版本号最高**的那个（不是 mtime 最新的） |
-| `/dl/radar-1.5.apk` | 指定版本 —— `/api/app` 的 `url` 字段给的就是这种确定路径 |
+| `/dl/radar-1.6.apk` | 指定版本 —— `/api/app` 的 `url` 字段给的就是这种确定路径 |
 | `/settings/` | App 设置页：自动更新开关、安装权限、手动下载安装 |
 
 都在统一鉴权之后（`APK` 里内嵌了口令，公开可下等于把口令挂网上）。
@@ -208,6 +208,59 @@ cd app/android
 扫码版：`python tools/make_download_qr.py --token <口令>`（默认就是 `/app`）。
 ⚠️ 二维码里编码了口令，**等于一把钥匙，别公开**；生成后**必须反解码校验**
 （`cv2.imread` 读不了中文路径时**静默返回 None**，要用 `np.fromfile`+`imdecode`）。
+
+---
+
+## 个人规划（App 内，只存手机本地）
+
+顶栏的清单图标 → 弹出「我的规划」面板：写一句要做什么（可选目标日期和备注），
+勾掉完成的，删错了 6 秒内可以撤销。
+
+**数据只存在这台手机上**（安卓壳的 `SharedPreferences`，key `plans_json`），
+**不上服务器** —— 服务器上不留任何痕迹，也不占任何接口。
+代价是换手机 / 清应用数据就没了；这是刻意的取舍，不是遗漏。
+
+### 怎么做到"只存本地"却不用给页面加接口
+
+| 层 | 干什么 |
+|---|---|
+| `MainActivity.NativeBridge` | `getPlans()` / `setPlans(json)` / `plansBytes()`，落 `SharedPreferences` |
+| `templates/base.html` | 弹窗骨架。**纯空壳** —— 里面一条规划数据都没有 |
+| `static/app.js` → `setupPlans()` | 打开时从桥读回来渲染；每次改动立刻写回 |
+
+和 `/settings/` 是同一个范式：**页面不注入数据，值全部运行时从桥里读**。
+好处是同一个页面在浏览器和 App 里表现不同，而服务端完全不需要知道客户端状态。
+
+### 几条不肯让步的设计
+
+- **落盘失败必须看得见。** `setPlans` 返回"到底存住了没有"
+  （用 `commit()` 而不是 `apply()` —— 后者是异步的，拿不到结果，只能永远报成功），
+  写失败时面板顶部出一条警告。最怕的不是丢数据，是**用户以为记下了**。
+- **不吃"改了内存就算数"。** 增 / 改 / 删都立刻落盘。
+  探针里"关掉面板再打开内容还在"是硬断言 —— 那才是真的存住了。
+- **删除不弹确认框。** ⚠️ WebView 里 `window.confirm` **默认根本不弹、直接返回 false**
+  （`WebChromeClient` 不处理 `onJsConfirm` 就是这行为），拿它做确认会变成
+  "点了删除没反应"。改成**立刻删 + 6 秒撤销** —— 后悔药本来也比确认框顺手。
+- **有上限，且超限明确失败。** 200 条 / 64KB（按 UTF-8 字节算，中文一个字 3 字节）。
+  `SharedPreferences` 在 App 启动时被**整体读进内存**，塞大了会拖慢每次冷启动；
+  超限**返回 false** 让界面提示，**绝不静默截断**
+  （截断的 JSON 解析不出来，等于把用户写的东西悄悄弄丢）。
+- **浏览器里不放假输入框。** 没有原生桥时，面板只显示一张"这个面板只在安卓 App 里可用"
+  的说明卡 —— 那个输入框存不进任何地方，比没有更让人困惑（和 `/settings/` 同一个判断）。
+  入口图标在浏览器里**仍然显示**，好让人知道 App 里有这个功能。
+- **用户输入走 `textContent` 而不是 `innerHTML`。** "这是我自己写的内容"不是安全理由；
+  探针里专有一条塞 `<img onerror=…>` 验它不会被执行。
+- **逾期用琥珀色（`--warn`），不用红色。** 本项目的红色是"涨"，拿它当警示会和行情语义打架。
+
+### 自测
+
+```bash
+bash tools/run_ui_probe.sh tools/plans_probe.mjs     # 58 项，真跑无头浏览器
+```
+
+探针注入一个**会真的存住**的假桥（`getPlans` 读的就是 `setPlans` 上一次写进去的串），
+所以"关掉再打开内容还在"才是有意义的断言 —— 否则只证明了内存里那个数组没被清掉。
+另有 `window.__failNextSave()` 专门把保存改成失败，用来验"存失败时页面上看得见"。
 
 ---
 
@@ -734,9 +787,24 @@ python3 -m radar clean --keep 90      # 清理过期数据
 ## 本地自测
 
 ```bash
-python3 smoke_test.py     # 12 段 / 307 项断言：语法编译 + 纯函数 + 整站渲染 + Web API
+python3 smoke_test.py     # 16 段 / 692 项断言：语法编译 + 纯函数 + 整站渲染 + Web API
                           # + 翻译 + 流水线接线 + 大模型客户端 + 代码上下文 + 总结接线
+                          # + 安卓壳更新链路 + 读书模块 + 设置页 + 个人规划面板
 ```
+
+静态断言查不出"页面上那个按钮点了到底有没有反应"。那类问题靠**无头 Chrome 真跑**
+（不装 Playwright / Puppeteer，用 Node 内置的 WebSocket 直连 CDP）：
+
+```bash
+bash tools/run_ui_probe.sh tools/reader_probe.mjs     # 阅读位置 / 书签   24 项
+bash tools/run_ui_probe.sh tools/settings_probe.mjs   # 设置页            28 项
+bash tools/run_ui_probe.sh tools/plans_probe.mjs      # 个人规划面板      58 项
+```
+
+⚠️ 包装脚本里 `--user-data-dir` 必须用 `cygpath -m` 转成 Windows 路径：
+`mktemp -d` 给的是 POSIX 路径，Windows 版 `chrome.exe` **不认、静默退出**
+（零输出、不监听端口），只会表现成"探针连不上 CDP"，把排查方向引到网络上。
+包装脚本现在会**单独判定 Chrome 有没有起来**并打印它的日志，不让它伪装成别的错。
 
 不联网。**没装 jinja2/flask 也能跑**，只是会跳过「整站渲染」和「Web API」两段
 （而 PWA 那批断言正好在「整站渲染」里，所以想验 PWA 就得装依赖）：

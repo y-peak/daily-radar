@@ -40,6 +40,7 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.util.Locale;
 
 /**
@@ -108,6 +109,21 @@ public class MainActivity extends Activity {
 
     /** SharedPreferences 里的键名，集中放一处免得拼错。 */
     private static final String PREF_AUTO = "auto_update";
+
+    /** 个人规划面板的内容，整块 JSON 存在这里。 */
+    private static final String PREF_PLANS = "plans_json";
+
+    /**
+     * 规划数据的落盘上限（64KB，按 UTF-8 字节算）。
+     *
+     * 这是个人备忘，正常几十条也就几 KB。设上限是防"某天手滑/脚本写入巨量数据"
+     * 把 SharedPreferences 撑爆 —— 它在 App 启动时会被**整体读进内存**，
+     * 真塞进去几十 MB，每次冷启动都要多等那一会儿。
+     *
+     * 超限时**明确返回 false**，让网页提示"没存进去" ——
+     * 绝不静默截断：截断后的 JSON 解析不出来，等于把用户写的东西悄悄弄丢了。
+     */
+    private static final int PLANS_MAX_BYTES = 64 * 1024;
 
     private SharedPreferences prefs;
 
@@ -184,6 +200,11 @@ public class MainActivity extends Activity {
             }
         });
 
+        // ⚠️ prefs 必须在**注册桥之前**就绪 —— 桥方法里会读它（getPlans / getAutoUpdate），
+        //    而注册之后页面随时可能调用。原先它在 loadUrl 之后才赋值，只因为
+        //    页面加载是异步的才一直没出问题：那是靠时序侥幸，不该留着。
+        prefs = getSharedPreferences("radar", Context.MODE_PRIVATE);
+
         // ⭐ 把"版本 + 检查更新"暴露给网页。
         //    注册必须在 loadUrl **之前** —— 否则首次加载的页面里
         //    window.RadarNative 是 undefined，那条入口要等下次加载才出现。
@@ -194,7 +215,6 @@ public class MainActivity extends Activity {
             web.loadUrl(AppConfig.START_URL);
         }
 
-        prefs = getSharedPreferences("radar", Context.MODE_PRIVATE);
         checkUpdate(false);
     }
 
@@ -302,6 +322,59 @@ public class MainActivity extends Activity {
                     checkUpdate(true, true);
                 }
             });
+        }
+
+        /* ---------------- 个人规划：只存在这台手机上 ----------------
+           为什么数据放在壳里、而不是网页的 localStorage：
+             · 规划是"我自己的东西"，不该依赖站点缓存是否被清，
+               也不该跟着 WebView 数据清理一起消失；
+             · 放 SharedPreferences 里 — App 在，数据就在；
+             · 而且**完全不经过服务器**（服务器上不留任何痕迹）。
+           代价是换手机/清数据就没了 —— 这是用户自己选的取舍，
+           真要同步得另加一套服务端存储，不是这里的默认行为。 */
+
+        /**
+         * 读回规划 JSON。
+         *
+         * 从未保存过时返回**空串**（而不是 "{}"）：网页据此区分
+         * "第一次用"和"保存过一个空列表"，好走对应文案。
+         */
+        @JavascriptInterface
+        public String getPlans() {
+            SharedPreferences p = prefs;
+            if (p == null) return "";
+            String s = p.getString(PREF_PLANS, "");
+            return s == null ? "" : s;
+        }
+
+        /**
+         * 整块写回规划 JSON。返回**到底存住了没有**。
+         *
+         * 用 commit() 而不是 apply()：本方法跑在 **JavaBridge 线程**（不是主线程），
+         * 这点磁盘 I/O 不会卡界面；而 apply() 是异步的、拿不到结果 ——
+         * 那就只能永远返回成功，等于骗网页"已保存"。
+         * 网页拿到 false 必须**显式提示**，做不到就别假装做到。
+         */
+        @JavascriptInterface
+        public boolean setPlans(String json) {
+            SharedPreferences p = prefs;
+            if (p == null || json == null) return false;
+            // 按 UTF-8 字节算：中文一个字 3 字节，用 length() 会严重低估
+            if (json.getBytes(StandardCharsets.UTF_8).length > PLANS_MAX_BYTES) return false;
+            try {
+                return p.edit().putString(PREF_PLANS, json).commit();
+            } catch (Exception e) {
+                return false;
+            }
+        }
+
+        /** 规划数据现在占了多少字节。设置页/排查用，正常情况用不到。 */
+        @JavascriptInterface
+        public int plansBytes() {
+            SharedPreferences p = prefs;
+            if (p == null) return 0;
+            String s = p.getString(PREF_PLANS, "");
+            return s == null ? 0 : s.getBytes(StandardCharsets.UTF_8).length;
         }
     }
 

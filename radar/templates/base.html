@@ -37,6 +37,12 @@
   </a>
   <div class="topbar-right">
     <span id="freshness" class="freshness" title="数据新鲜度">—</span>
+    {# 个人规划入口。**只在安卓壳里出现**：数据存在手机本地（原生存储），
+       浏览器里既没有读写权限、也就没有放这个入口的理由 —— 
+       与设置页同一套范式：没有能力就不摆按钮，别做点了没反应的东西。 #}
+    <button id="plans-btn" class="icon-btn" title="我的规划" aria-label="我的规划" hidden>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5h11M9 12h11M9 19h11"/><path d="M3.5 5l1.2 1.2L7 4"/><path d="M3.5 12l1.2 1.2L7 11"/><path d="M3.5 19l1.2 1.2L7 18"/></svg>
+    </button>
     <button id="install-btn" class="icon-btn" title="安装到主屏幕" hidden>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-4-4m4 4l4-4M5 21h14"/></svg>
     </button>
@@ -158,6 +164,77 @@
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 11-9-9c2.5 0 4.8 1 6.5 2.7L21 8"/><path d="M21 3v5h-5"/></svg>
 </button>
 {% endif %}
+
+{# ============================================================================
+   个人规划弹窗（App 内）
+
+   同样是**外壳式**的：这份 HTML 里没有任何一条规划数据，全部由 app.js
+   在运行时从原生存储（SharedPreferences）读回来再画。
+   带来的两个结果：
+     · 数据只在这台手机上，服务器上没有任何痕迹；
+     · 用浏览器打开时它只能显示一张"仅 App 内可用"的说明卡 ——
+       这里**刻意不放**输入框，因为那个输入框存不了任何地方，
+       比没有更让人困惑（和设置页同一个判断）。
+
+   `data-no-collapse` 是给 setupCollapsible 的：折叠逻辑只该管内容卡，
+   不该管一个弹窗。
+   ============================================================================ #}
+<div id="plans-modal" class="plans-modal" hidden>
+  <div class="plans-veil" data-plans-close></div>
+  <section class="plans-card" role="dialog" aria-modal="true"
+           aria-labelledby="plans-title" data-no-collapse>
+    <header class="plans-head">
+      <h2 id="plans-title">我的规划</h2>
+      <button type="button" class="plans-x" data-plans-close aria-label="关闭">×</button>
+    </header>
+
+    {# 状态条：保存失败、条数上限这类"必须让你知道"的事写在这里。
+       默认空着且隐藏 —— 没有问题时不该占位置。
+       放在滚动区**外面**：这是警告，不能滚上去就看不见了。 #}
+    <p id="plans-note" class="plans-note" hidden></p>
+
+    <div class="plans-body">
+    {# 浏览器分支：只解释，不放控件 #}
+    <div id="plans-web" class="plans-web" hidden>
+      <p><strong>这个面板只在安卓 App 里可用。</strong></p>
+      <p>规划数据保存在你手机本地、不经过服务器，所以网页端没有读写它的权限。</p>
+      <p>在 App 里点顶栏的清单图标即可打开。</p>
+    </div>
+
+    {# App 分支 #}
+    <div id="plans-app" hidden>
+      <form id="plan-form" class="plan-form" autocomplete="off">
+        <input id="plan-title" class="plan-input" type="text" maxlength="80"
+               placeholder="要做什么？" aria-label="规划内容" required>
+        <div class="plan-row">
+          <input id="plan-due" class="plan-due" type="date" aria-label="目标日期">
+          <input id="plan-memo" class="plan-input" type="text" maxlength="120"
+                 placeholder="备注（可留空）" aria-label="备注">
+        </div>
+        <button id="plan-add" class="plan-add" type="submit">添加</button>
+      </form>
+
+      <div class="plan-bar">
+        <span id="plan-count" class="plan-count">—</span>
+        <button id="plan-hide-done" class="plan-linkish" type="button" hidden>隐藏已完成</button>
+      </div>
+
+      <p id="plan-empty" class="plan-empty" hidden>
+        还没有规划。上面写一条，点「添加」。
+      </p>
+      <ul id="plan-list" class="plan-list"></ul>
+
+      {# 撤销条：删除是立刻生效的，但给 6 秒后悔时间。
+         比"先弹确认框"更顺手，也直接对应本项目那条铁律 ——
+         不许在用户没察觉的情况下把数据弄丢。 #}
+      <div id="plan-undo" class="plan-undo" hidden>
+        <span id="plan-undo-txt">已删除</span>
+        <button id="plan-undo-btn" class="plan-linkish" type="button">撤销</button>
+      </div>
+    </div>
+    </div>
+  </section>
+</div>
 
 <div id="toast" class="toast" hidden></div>
 

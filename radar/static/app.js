@@ -758,6 +758,406 @@
     }
   }
 
+  /* ============================================================ 个人规划（App 内）
+     数据只存在**这台手机上**（原生 SharedPreferences，见 MainActivity 的
+     getPlans / setPlans），完全不经过服务器 —— 服务器上不留任何痕迹。
+
+     几条刻意的决定：
+
+       · 浏览器里没有原生桥 → 面板只显示一张"仅 App 内可用"的说明卡。
+         那里**刻意不放输入框**：那个输入框存不进任何地方，比没有更让人困惑
+         （和设置页同一个判断）。入口图标仍然显示，好让人知道 App 里有这个功能。
+
+       · 每次改动**立刻落盘**，并把落盘结果画到页面上。存失败必须看得见 ——
+         本项目最容易犯的错就是"安静地失败"。
+
+       · 删除**不弹确认框**，改成"立刻删 + 6 秒撤销"。
+         ⚠️ WebView 里 window.confirm 默认**根本不弹**、直接返回 false
+         （WebChromeClient 不处理 onJsConfirm 时就是这个行为），
+         拿它做确认会变成"点了删除没反应"；而且后悔药本来也比确认框顺手。
+
+       · 排序在**渲染时算**、不落盘：排序是展示规则，不该固化进数据。
+
+       · "隐藏已完成"只作用于本次打开、不落盘 ——
+         否则下次打开看到一张空列表面板，会以为数据丢了。
+
+     页面结构在 templates/base.html，样式在 style.css 第 33 节。 */
+  function setupPlans() {
+    var modal = document.getElementById("plans-modal");
+    var btn = document.getElementById("plans-btn");
+    if (!modal || !btn) return;
+
+    var native = window.RadarNative;
+
+    var noteEl   = document.getElementById("plans-note");
+    var webBox   = document.getElementById("plans-web");
+    var appBox   = document.getElementById("plans-app");
+    var listEl   = document.getElementById("plan-list");
+    var emptyEl  = document.getElementById("plan-empty");
+    var countEl  = document.getElementById("plan-count");
+    var hideBtn  = document.getElementById("plan-hide-done");
+    var undoBox  = document.getElementById("plan-undo");
+    var undoTxt  = document.getElementById("plan-undo-txt");
+    var undoBtn  = document.getElementById("plan-undo-btn");
+    var formEl   = document.getElementById("plan-form");
+    var titleEl  = document.getElementById("plan-title");
+    var dueEl    = document.getElementById("plan-due");
+    var memoEl   = document.getElementById("plan-memo");
+
+    var MAX_ITEMS = 200;
+    var PLANS_MAX = 64 * 1024;    // 与 MainActivity 的 PLANS_MAX_BYTES 保持一致
+
+    var items = [];
+    var hideDone = false;         // 仅本次打开有效
+    var undoRec = null;           // { item, idx, timer }
+
+    /* ---------------- 小工具 ---------------- */
+
+    function uid() {
+      return "p" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    }
+
+    /* 今天的日期串（YYYY-MM-DD）。
+       ⚠️ 不能用 new Date().toISOString().slice(0,10)：那是 UTC，
+       在东八区，凌晨 0-8 点算出来的"今天"其实是昨天，
+       逾期判断会在这段时间反向出错。必须走本地时间。 */
+    function todayStr() {
+      var d = new Date();
+      var m = d.getMonth() + 1;
+      var day = d.getDate();
+      return d.getFullYear() + "-" + (m < 10 ? "0" + m : m) + "-" + (day < 10 ? "0" + day : day);
+    }
+
+    function note(text, cls) {
+      if (!noteEl) return;
+      noteEl.textContent = text || "";
+      noteEl.className = "plans-note" + (cls ? " " + cls : "");
+      noteEl.hidden = !text;
+    }
+
+    function byId(id) {
+      for (var i = 0; i < items.length; i++) {
+        if (items[i].id === id) return items[i];
+      }
+      return null;
+    }
+
+    /* ---------------- 读 / 写 ---------------- */
+
+    /* 清洗：只留下结构正确的条目。
+       历史数据里什么都有可能（字段缺失、类型不对、被截断的一半），
+       一条脏数据不该让整个面板崩掉 —— 逐条校验，坏的丢掉。 */
+    function sanitize(arr) {
+      var out = [];
+      if (!arr || !arr.length) return out;
+      for (var i = 0; i < arr.length && out.length < MAX_ITEMS; i++) {
+        var it = arr[i];
+        if (!it || typeof it.t !== "string" || !it.t) continue;
+        out.push({
+          id: typeof it.id === "string" && it.id ? it.id : uid(),
+          t: it.t.slice(0, 80),
+          due: typeof it.due === "string" ? it.due : "",
+          memo: typeof it.memo === "string" ? it.memo.slice(0, 120) : "",
+          done: !!it.done,
+          at: typeof it.at === "string" ? it.at : ""
+        });
+      }
+      return out;
+    }
+
+    function load() {
+      var raw = "";
+      try { raw = native.getPlans() || ""; }
+      catch (e) { raw = ""; }
+      if (!raw) { items = []; return; }
+      var obj = null;
+      try { obj = JSON.parse(raw); }
+      catch (e) {
+        items = [];
+        note("手机里存的数据读不出来（可能被截断）。现在先当空列表显示，"
+           + "下一次改动会把它覆盖掉 —— 如果你记得里面有内容，先别改。", "is-warn");
+        return;
+      }
+      items = sanitize(obj && obj.items);
+    }
+
+    /* 落盘。返回值直接用"到底存住了没有"，不假装成功。 */
+    function save() {
+      var payload;
+      try { payload = JSON.stringify({ v: 1, items: items }); }
+      catch (e) { note("内容没法序列化，这次没有保存。", "is-warn"); return false; }
+
+      var ok = false;
+      try { ok = native.setPlans(payload) === true; }
+      catch (e) { ok = false; }
+
+      if (!ok) {
+        note("⚠️ 没有存进手机（可能已到存储上限）。这次改动在关掉面板后可能会丢。", "is-warn");
+        return false;
+      }
+
+      /* 只在快满的时候提一句 —— 平时不打扰，但快到顶了必须提前说，
+         否则用户会在某天写入被拒时才发现。 */
+      var used = 0;
+      try { used = native.plansBytes ? (native.plansBytes() || 0) : 0; } catch (e) { used = 0; }
+      if (used > PLANS_MAX * 0.75) {
+        note("已用约 " + Math.round(used / 1024) + " KB / " + (PLANS_MAX / 1024)
+           + " KB，接近上限了。清掉一些旧条目吧。", "is-warn");
+      } else {
+        note("");
+      }
+      return true;
+    }
+
+    /* ---------------- 渲染 ---------------- */
+
+    /* 排序：未完成在前 → 目标日期近的在前（没定日期的排在有日期的后面）
+       → 新建的在前。 */
+    function ordered() {
+      return items.slice().sort(function (a, b) {
+        if (a.done !== b.done) return a.done ? 1 : -1;
+        var ad = a.due || "", bd = b.due || "";
+        if (ad !== bd) {
+          if (!ad) return 1;
+          if (!bd) return -1;
+          return ad < bd ? -1 : 1;
+        }
+        return (a.at || "") < (b.at || "") ? 1 : -1;
+      });
+    }
+
+    function isOverdue(it) {
+      return !!it.due && !it.done && it.due < todayStr();
+    }
+
+    function makeRow(it) {
+      var li = document.createElement("li");
+      li.className = "plan-item" + (it.done ? " is-done" : "");
+      li.setAttribute("data-id", it.id);
+
+      var chk = document.createElement("button");
+      chk.type = "button";
+      chk.className = "plan-check";
+      chk.setAttribute("aria-label", it.done ? "取消完成" : "标记完成");
+      chk.addEventListener("click", function () { toggle(it.id); });
+
+      var main = document.createElement("div");
+      main.className = "plan-main";
+
+      var t = document.createElement("span");
+      t.className = "plan-t";
+      /* ⭐ textContent 而不是 innerHTML：标题是用户自己输入的，
+         走 innerHTML 就等于把输入当代码执行了。 */
+      t.textContent = it.t;
+      main.appendChild(t);
+
+      var sub = document.createElement("span");
+      sub.className = "plan-sub";
+      if (it.due) {
+        var d = document.createElement("span");
+        d.className = "plan-date" + (isOverdue(it) ? " is-overdue" : "");
+        d.textContent = (isOverdue(it) ? "逾期 " : "") + it.due.slice(5);
+        sub.appendChild(d);
+      }
+      if (it.memo) {
+        var m = document.createElement("span");
+        m.className = "plan-memo";
+        m.textContent = it.memo;
+        sub.appendChild(m);
+      }
+      if (sub.childNodes.length) main.appendChild(sub);
+
+      var del = document.createElement("button");
+      del.type = "button";
+      del.className = "plan-del";
+      del.setAttribute("aria-label", "删除");
+      del.textContent = "×";
+      del.addEventListener("click", function () { remove(it.id); });
+
+      li.appendChild(chk);
+      li.appendChild(main);
+      li.appendChild(del);
+      return li;
+    }
+
+    function render() {
+      if (!listEl) return;
+      var arr = ordered();
+      var shown = [];
+      var doneN = 0;
+      for (var i = 0; i < arr.length; i++) {
+        if (arr[i].done) doneN++;
+        if (hideDone && arr[i].done) continue;
+        shown.push(arr[i]);
+      }
+
+      listEl.textContent = "";
+      for (var j = 0; j < shown.length; j++) listEl.appendChild(makeRow(shown[j]));
+
+      if (countEl) {
+        countEl.textContent = "未完成 " + (items.length - doneN) + " · 已完成 " + doneN;
+      }
+      if (hideBtn) {
+        hideBtn.hidden = doneN === 0;
+        hideBtn.textContent = hideDone ? "显示已完成" : "隐藏已完成";
+      }
+      if (emptyEl) {
+        emptyEl.hidden = shown.length > 0;
+        emptyEl.textContent = items.length
+          ? "未完成的都清了。已完成的那几条被隐藏着，点上面的「显示已完成」看。"
+          : "还没有规划。上面写一条，点「添加」。";
+      }
+    }
+
+    /* ---------------- 增 / 改 / 删 ---------------- */
+
+    function add() {
+      var title = (titleEl && titleEl.value || "").replace(/^\s+|\s+$/g, "");
+      if (!title) {
+        note("先写一句要做什么，再添加。", "is-warn");
+        if (titleEl) titleEl.focus();
+        return;
+      }
+      if (items.length >= MAX_ITEMS) {
+        note("最多存 " + MAX_ITEMS + " 条，先清掉一些旧的吧。", "is-warn");
+        return;
+      }
+      items.push({
+        id: uid(),
+        t: title.slice(0, 80),
+        due: (dueEl && dueEl.value) || "",
+        memo: ((memoEl && memoEl.value) || "").replace(/^\s+|\s+$/g, "").slice(0, 120),
+        done: false,
+        at: new Date().toISOString()
+      });
+      if (titleEl) titleEl.value = "";
+      if (memoEl) memoEl.value = "";
+      if (dueEl) dueEl.value = "";
+      save();
+      render();
+      vibrate(10);
+      /* 连着记几条时不用再点一次输入框 */
+      if (titleEl) titleEl.focus();
+    }
+
+    function toggle(id) {
+      var it = byId(id);
+      if (!it) return;
+      it.done = !it.done;
+      vibrate(it.done ? 14 : 6);
+      save();
+      render();
+    }
+
+    function remove(id) {
+      var idx = -1;
+      for (var i = 0; i < items.length; i++) {
+        if (items[i].id === id) { idx = i; break; }
+      }
+      if (idx < 0) return;
+      var gone = items[idx];
+      items.splice(idx, 1);
+      save();
+      render();
+      vibrate(8);
+      showUndo(gone, idx);
+    }
+
+    /* ---------------- 撤销条 ----------------
+       删除立刻生效，但给 6 秒后悔时间。比确认框顺手，
+       也正好守住本项目那条铁律：不许在用户没察觉时把数据弄丢。 */
+
+    function dropUndo() {
+      if (undoRec && undoRec.timer) clearTimeout(undoRec.timer);
+      undoRec = null;
+      if (undoBox) undoBox.hidden = true;
+    }
+
+    function showUndo(item, idx) {
+      dropUndo();
+      undoRec = { item: item, idx: idx, timer: null };
+      if (undoTxt) {
+        var s = item.t.length > 12 ? item.t.slice(0, 12) + "…" : item.t;
+        undoTxt.textContent = "已删除「" + s + "」";
+      }
+      if (undoBox) undoBox.hidden = false;
+      undoRec.timer = setTimeout(dropUndo, 6000);
+    }
+
+    function doUndo() {
+      if (!undoRec) return;
+      var rec = undoRec;
+      dropUndo();
+      /* 夹住下标：撤销期间如果又删过别的，原来的位置可能已经越界 */
+      var at = rec.idx > items.length ? items.length : rec.idx;
+      items.splice(at, 0, rec.item);
+      save();
+      render();
+      toast("已恢复");
+      vibrate(10);
+    }
+
+    /* ---------------- 开关面板 ---------------- */
+
+    function isOpen() { return !modal.hidden; }
+
+    function open() {
+      hideDone = false;
+      note("");
+      dropUndo();
+      var app = !!native;
+      if (app) load();              // 每次打开都重新读一遍，保证看到的是手机里真实的
+      if (webBox) webBox.hidden = app;
+      if (appBox) appBox.hidden = !app;
+      if (app) render();
+
+      modal.hidden = false;
+      document.body.classList.add("plans-open");
+      /* 下一帧再加类，否则 display 从 none 到 flex 和透明度过渡在同一帧里，
+         浏览器不会做动画 —— 会"啪"地直接出现。 */
+      requestAnimationFrame(function () { modal.classList.add("is-in"); });
+      vibrate(8);
+    }
+
+    function close() {
+      modal.classList.remove("is-in");
+      document.body.classList.remove("plans-open");
+      dropUndo();
+      setTimeout(function () {
+        /* 动画期间用户可能又点开了，别把新的那次关掉 */
+        if (!modal.classList.contains("is-in")) modal.hidden = true;
+      }, 220);
+    }
+
+    /* 入口在浏览器里也显示：点开能看到"只在 App 里可用"，
+       比一个凭空消失的图标更好懂（设置页的入口也是这个取向）。 */
+    btn.hidden = false;
+    btn.addEventListener("click", function () {
+      if (isOpen()) close(); else open();
+    });
+
+    Array.prototype.forEach.call(modal.querySelectorAll("[data-plans-close]"), function (el) {
+      el.addEventListener("click", close);
+    });
+    document.addEventListener("keydown", function (ev) {
+      if (ev.key === "Escape" && isOpen()) close();
+    });
+
+    if (formEl) {
+      formEl.addEventListener("submit", function (ev) {
+        ev.preventDefault();     // 别让表单真提交，那会整页刷新
+        add();
+      });
+    }
+    if (hideBtn) {
+      hideBtn.addEventListener("click", function () {
+        hideDone = !hideDone;
+        render();
+      });
+    }
+    if (undoBtn) undoBtn.addEventListener("click", doUndo);
+  }
+
   /* ============================================================ 把静音恢复 */
   function restoreMuted() {
     try {
@@ -1395,6 +1795,7 @@
   setupInstallBanner();
   setupAppVersion();
   setupSettings();
+  setupPlans();
   setupSwipeBetweenModules();
   setupCountUp();
   setupReaderChapter();
