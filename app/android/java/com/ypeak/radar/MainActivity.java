@@ -4,14 +4,17 @@ import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.ActivityNotFoundException;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.provider.Settings;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
@@ -24,6 +27,7 @@ import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.webkit.ValueCallback;
 import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
@@ -114,6 +118,33 @@ public class MainActivity extends Activity {
     private static final String PREF_PLANS = "plans_json";
 
     /**
+     * "通知权限已经问过用户了没有"。
+     *
+     * ⭐ 为什么要记这个：API 33 起那个权限弹框**一辈子只弹一次**
+     * （用户拒绝之后系统不再弹，再调 requestPermissions 也是立刻回调失败）。
+     * 不记的话，我们会在每次保存规划时"请求"一次而屏幕上什么都没有 ——
+     * 用户只觉得偶尔卡一下，而真正该给他的引导（去系统设置里开）
+     * 反而永远不出现。
+     */
+    private static final String PREF_NOTIFY_ASKED = "plan_notify_asked";
+
+    /** 请求通知权限用的 requestCode。 */
+    private static final int REQ_NOTIFY = 21;
+
+    /**
+     * 掀开规划面板的 JS 钩子（定义在 app.js 的 setupPlans 里）。
+     *
+     * ⭐ 它是**带返回值**的，不是随手调一下：页面没加载完、或者当时停在别的页面
+     * （比如正在读书）时，window.RadarPlansOpen 根本不存在，调用就是一次
+     * 静默的空操作 —— 用户看到的是"点了通知进来，什么都没发生"。
+     * 拿到 "no" 我们才能改走"先回首页再掀"这条路。
+     */
+    private static final String JS_OPEN_PLANS =
+            "(function(){"
+            + "if(typeof window.RadarPlansOpen==='function'){window.RadarPlansOpen();return 'ok';}"
+            + "return 'no';})()";
+
+    /**
      * 规划数据的落盘上限（64KB，按 UTF-8 字节算）。
      *
      * 这是个人备忘，正常几十条也就几 KB。设上限是防"某天手滑/脚本写入巨量数据"
@@ -145,6 +176,23 @@ public class MainActivity extends Activity {
      * 否则用户授完权回来发现"什么都没发生"，还得自己再点一次下载。
      */
     private File pendingApk;
+
+    /**
+     * 这次进来是"点了到期提醒的通知"进来的 —— 要把规划面板掀开。
+     *
+     * 三种入口都得认：通知点击（onNewIntent，App 还活着）、
+     * 通知点击（onCreate，进程被杀过）、以及冷启动时 Intent 里带着这个标记。
+     */
+    private boolean pendingOpenPlans = false;
+
+    /** 页面加载完没有。没加载完就调 JS 钩子必然是空操作。 */
+    private boolean pageLoaded = false;
+
+    /** 已经试过"先回首页再掀面板"没有（面板只在首页上，见 dispatchPendingPanel）。 */
+    private boolean panelTriedRoot = false;
+
+    /** 掀面板的尝试次数。有上限 —— 无限重试会把一个偶发问题变成持续耗电。 */
+    private int panelTries = 0;
 
     @Override
     protected void onCreate(Bundle state) {
@@ -213,6 +261,22 @@ public class MainActivity extends Activity {
 
         if (state == null || web.restoreState(state) == null) {
             web.loadUrl(AppConfig.START_URL);
+        }
+
+        // 从通知点进来（进程被杀过的那种）：记下"要把规划面板掀开"。
+        // 真正掀开要等页面加载完 —— 见 dispatchPendingPanel。
+        pendingOpenPlans = wantsPlans(getIntent());
+
+        // ⭐ 每次打开 App 都把提醒重排一次。
+        //    闹钟会被系统在"应用被强行停止 / 清理后台 / 重启"之后清掉，
+        //    而"用户打开了 App"就是把它重新排上的最好时机。
+        //    同一时刻只存在一个闹钟（固定 requestCode 会替换掉旧的），
+        //    所以重复调用是幂等的，不用先判断。
+        try {
+            Notifier.ensureChannel(this);
+            PlanReminder.reschedule(this);
+        } catch (Exception ignored) {
+            // 排程失败最坏就是"这次不提醒"；让它把开 App 弄崩才是不可接受的
         }
 
         checkUpdate(false);
@@ -362,7 +426,18 @@ public class MainActivity extends Activity {
             // 按 UTF-8 字节算：中文一个字 3 字节，用 length() 会严重低估
             if (json.getBytes(StandardCharsets.UTF_8).length > PLANS_MAX_BYTES) return false;
             try {
-                return p.edit().putString(PREF_PLANS, json).commit();
+                boolean ok = p.edit().putString(PREF_PLANS, json).commit();
+                if (ok) {
+                    // ⭐ 存住了就顺手重排提醒。挂在这里而不是让网页显式再调一次：
+                    //    写规划**只有这一条路径**，挂在这儿就不可能"忘了排"——
+                    //    而忘排的表现是"设了提醒但从来没人提醒我"，完全静默。
+                    PlanReminder.reschedule(MainActivity.this);
+                    // 顺带把"已经不该挂着"的通知收掉（做完了/删了的那条）。
+                    // ⚠️ 注意这不发生在"打开 App"那条路径上 —— 开 App 不等于看过提醒。
+                    PlanReminder.dropStaleNotification(MainActivity.this);
+                    maybeAskNotify();
+                }
+                return ok;
             } catch (Exception e) {
                 return false;
             }
@@ -375,6 +450,110 @@ public class MainActivity extends Activity {
             if (p == null) return 0;
             String s = p.getString(PREF_PLANS, "");
             return s == null ? 0 : s.getBytes(StandardCharsets.UTF_8).length;
+        }
+
+        /* ---------------- 规划提醒（到期当天 9:00 的系统通知） ----------------
+
+           分工：**什么时候响**全部由原生算（见 PlanReminder）——它必须在
+           App 没打开、甚至没联网的时候也自洽，所以不能依赖网页。
+           网页这边只做三件事：把事实显示出来、把用户送到该去的地方、
+           给一个"立刻发一条"的验证入口。
+
+           ⚠️ 全都是"读事实"或"跳转"，没有任何能改排程结果的方法 ——
+              排程只跟着 plans_json 走，而写 plans_json 只有 setPlans 一条路。
+
+           ⚠️ 刻意**只暴露这几个**：像 canNotify / exactAlarmAllowed 这种
+              "同一件事实的第二条查询路径"一律不单独开方法 ——
+              reminderInfo() 已经把它们一起给了。两处来源迟早会不一致，
+              而不一致的表现是"设置页说开着、实际没开"。
+              （smoke_test 里有一条断言盯着"暴露的桥方法都被用到了"。 */
+
+        /**
+         * 设置页要的那点事实，一次性给全（JSON 字符串，字段含义见 PlanReminder.nextInfo）。
+         *
+         * 为什么要 JSON 而不是原生拼好的句子：文案属于展示层。原生只回答
+         * "事实是什么"，改措辞就不用重新发版装 APK。
+         */
+        @JavascriptInterface
+        public String reminderInfo() {
+            return PlanReminder.nextInfo(MainActivity.this);
+        }
+
+        /**
+         * 要通知权限。
+         *
+         * ⚠️ 弹框只出现一次。所以原生自己判断："还没问过"就弹框，
+         *    "问过了 / 是在系统设置里关掉的"就直接把人送到系统设置页 ——
+         *    否则表现就是"点了按钮什么也没发生"。
+         *    也正因为这条兜底，"去通知设置"不需要再单独开一个方法。
+         */
+        @JavascriptInterface
+        public void requestNotify() {
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    askNotifyPermission();
+                }
+            });
+        }
+
+        /** 跳「闹钟与提醒」权限页（API 31+ 才有这一项）。 */
+        @JavascriptInterface
+        public void openExactAlarmSettings() {
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    gotoExactAlarmSettings();
+                }
+            });
+        }
+
+        /**
+         * 这台机器要不要额外去开"自启动"？返回厂商名（如"小米"），不需要就是空串。
+         *
+         * 为什么这事归原生管：国产 ROM 默认禁自启动，被禁之后 AlarmManager
+         * 排的闹钟**根本不响**且不报错 —— 正是本项目最忌讳的那类静默失效。
+         * 网页拿到厂商名才好在设置页上把"去哪里打开"摆出来。
+         */
+        @JavascriptInterface
+        public String autoStartVendor() {
+            return vendorNeedingAutoStart();
+        }
+
+        /**
+         * 打开厂商的自启动管理页。
+         *
+         * 没有返回值：桥方法跑在 JavaBridge 线程，而 startActivity 要回主线程，
+         * 异步了就拿不到结果。所以"能不能打开"不靠返回值，靠**打开不了时给一句
+         * 明确的话**（提示去应用详情里找），不让用户面对一个点了没反应的按钮。
+         */
+        @JavascriptInterface
+        public void openAutoStartSettings() {
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    if (!launchAutoStartSettings()) {
+                        toastUi(getString(R.string.notify_no_autostart_page));
+                        gotoAppDetails();
+                    }
+                }
+            });
+        }
+
+        /**
+         * 立刻发一条测试通知。
+         *
+         * 这条链路（权限 → 渠道 → 通知 → 点开进面板）没有办法在无头环境里自动验证，
+         * 所以必须给用户一个一按就能看见结果的按钮 —— 否则"提醒到底通没通"
+         * 只能等到期那天才知道，而那天往往正是要用的时候。
+         */
+        @JavascriptInterface
+        public boolean testNotify() {
+            boolean ok = PlanReminder.testNow(MainActivity.this);
+            if (!ok) {
+                toastLater(getString(R.string.notify_test_failed));
+            }
+            return ok;
         }
     }
 
@@ -781,6 +960,176 @@ public class MainActivity extends Activity {
         }
     }
 
+    // =================================================== 规划提醒：权限与跳转
+    /**
+     * 存下一条"定了日期"的规划时，顺口问一次通知权限。
+     *
+     * 为什么挑这个时机：用户此刻刚表达了"我要在某天做这件事"，弹框的来意
+     * 不言自明。冷启动就弹的话，用户还不知道这应用能提醒什么，多半直接拒绝，
+     * 而系统那个弹框**只有这一次机会** —— 拒了就再也不能弹了。
+     *
+     * 只问一次（PREF_NOTIFY_ASKED）。之后靠设置页/面板上的显式入口。
+     */
+    private void maybeAskNotify() {
+        if (Notifier.canNotify(this)) return;
+        if (wasNotifiedAsked()) return;
+        if (!PlanReminder.hasDatedPlan(this)) return;
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                askNotifyPermission();
+            }
+        });
+    }
+
+    private boolean wasNotifiedAsked() {
+        return prefs != null && prefs.getBoolean(PREF_NOTIFY_ASKED, false);
+    }
+
+    /**
+     * 要通知权限，或者把用户送到能开它的地方。
+     *
+     * ⚠️ 必须区分"还没问过"和"问过了/被系统关掉了"：
+     *    · 还没问过 → requestPermissions（弹系统框，只有这一次机会）
+     *    · 问过了  → 直接跳系统设置页。再调 requestPermissions 是不出声的空转，
+     *                表现就是"点了按钮什么也没发生"。
+     */
+    private void askNotifyPermission() {
+        if (Notifier.canNotify(this)) {
+            toastUi(getString(R.string.notify_already));
+            return;
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+                && !Notifier.hasRuntimePermission(this)
+                && !wasNotifiedAsked()) {
+            prefs.edit().putBoolean(PREF_NOTIFY_ASKED, true).apply();
+            requestPermissions(
+                    new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, REQ_NOTIFY);
+            return;
+        }
+        toastUi(getString(R.string.notify_need_perm));
+        gotoNotifySettings();
+    }
+
+    /** 跳本应用的通知设置页。API 26 起有专门的页面，更早的版本退到应用详情。 */
+    private void gotoNotifySettings() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            try {
+                Intent it = new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS);
+                it.putExtra(Settings.EXTRA_APP_PACKAGE, getPackageName());
+                startActivity(it);
+                return;
+            } catch (Exception ignored) {
+                // 个别 ROM 没做这个页面
+            }
+        }
+        gotoAppDetails();
+    }
+
+    /** 跳到「闹钟与提醒」特殊权限页。API 31 之前没有这一项，什么都不做。 */
+    private void gotoExactAlarmSettings() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+            return;
+        }
+        try {
+            startActivity(new Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM,
+                    Uri.parse("package:" + getPackageName())));
+            return;
+        } catch (Exception ignored) {
+            // 有的 ROM 把这一页藏起来了，退到应用详情让用户自己找
+        }
+        gotoAppDetails();
+    }
+
+    private void gotoAppDetails() {
+        try {
+            startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    Uri.parse("package:" + getPackageName())));
+        } catch (ActivityNotFoundException ignored) {
+        }
+    }
+
+    /**
+     * 这台机器是不是"默认禁自启动"的那类，是的话返回厂商名。
+     *
+     * 为什么值得单独判一次：国产 ROM（小米/华为/OPPO/vivo/三星…）默认禁止
+     * 应用自启动，被禁之后 AlarmManager 排的闹钟**根本不会响**，也不会有任何
+     * 报错 —— 表现就是"我明明设了提醒，却从来没被提醒过"。
+     * 这类静默失效只能靠"把入口摆到用户面前"来解决。
+     *
+     * 判断只看厂商名，不做机型白名单：宁可多显示一个入口，
+     * 也不要因为认不出来而漏掉真正需要它的那台机器。
+     */
+    private String vendorNeedingAutoStart() {
+        String m = Build.MANUFACTURER == null ? "" : Build.MANUFACTURER.toLowerCase(Locale.ROOT);
+        String b = Build.BRAND == null ? "" : Build.BRAND.toLowerCase(Locale.ROOT);
+        String mb = m + " " + b;
+        if (mb.contains("xiaomi") || mb.contains("redmi") || mb.contains("poco")) return "小米";
+        if (mb.contains("huawei") || mb.contains("honor")) return "华为";
+        if (mb.contains("oppo") || mb.contains("realme") || mb.contains("oneplus")) return "OPPO";
+        if (mb.contains("vivo") || mb.contains("iqoo")) return "vivo";
+        if (mb.contains("samsung")) return "三星";
+        if (mb.contains("meizu")) return "魅族";
+        return "";
+    }
+
+    /**
+     * 试着打开厂商的自启动管理页。
+     *
+     * 这些页面都不是公开 API，机型之间差别很大，所以只能**按常见清单逐个试**，
+     * 试不通就返回 false 让调用方给一句明白话（去应用详情里找）。
+     * 一个点了没反应的按钮比没有按钮更糟 —— 这是本项目一贯的判断。
+     */
+    private boolean launchAutoStartSettings() {
+        String[][] pages = {
+                {"com.miui.securitycenter", "com.miui.permcenter.autostart.AutoStartManagementActivity"},
+                {"com.huawei.systemmanager", "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity"},
+                {"com.huawei.systemmanager", "com.huawei.systemmanager.optimize.process.ProtectActivity"},
+                {"com.coloros.safecenter", "com.coloros.safecenter.permission.startup.StartupAppListActivity"},
+                {"com.coloros.safecenter", "com.coloros.safecenter.startupapp.StartupAppListActivity"},
+                {"com.oppo.safe", "com.oppo.safe.permission.startup.StartupAppListActivity"},
+                {"com.vivo.permissionmanager", "com.vivo.permissionmanager.activity.BgStartUpManagerActivity"},
+                {"com.iqoo.secure", "com.iqoo.secure.ui.phoneoptimize.AddWhiteListActivity"},
+                {"com.samsung.android.lool", "com.samsung.android.sm.ui.battery.BatteryActivity"},
+                {"com.meizu.safe", "com.meizu.safe.security.SHOW_APPSEC"},
+        };
+        for (int i = 0; i < pages.length; i++) {
+            try {
+                Intent it = new Intent();
+                it.setComponent(new ComponentName(pages[i][0], pages[i][1]));
+                startActivity(it);
+                return true;
+            } catch (Exception ignored) {
+                // 这台机器没有这一页：试下一个
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 权限回调。
+     *
+     * 拿到权限要**立刻重排一次**：被拒的时候我们排的是不精确闹钟（甚至是没排），
+     * 授完之后不重排的话，用户会发现"给了权限还是晚点才响"。
+     */
+    @Override
+    public void onRequestPermissionsResult(int code, String[] perms, int[] granted) {
+        super.onRequestPermissionsResult(code, perms, granted);
+        if (code != REQ_NOTIFY) {
+            return;
+        }
+        boolean ok = granted != null && granted.length > 0
+                && granted[0] == PackageManager.PERMISSION_GRANTED;
+        toastUi(getString(ok ? R.string.notify_granted : R.string.notify_denied));
+        if (ok) {
+            try {
+                PlanReminder.reschedule(this);
+            } catch (Exception ignored) {
+            }
+        }
+        refreshReminderUi();
+    }
+
     /**
      * 真的拉起安装。
      *
@@ -855,6 +1204,91 @@ public class MainActivity extends Activity {
         offlineView.setVisibility(View.GONE);
     }
 
+    // ------------------------------------------------------------------ 点通知进面板
+    /** 这个 Intent 是不是"点到期提醒进来的"。 */
+    private boolean wantsPlans(Intent it) {
+        return it != null && it.getBooleanExtra(PlanReminder.EXTRA_OPEN_PLANS, false);
+    }
+
+    /**
+     * 把"掀开规划面板"这件事交给网页。
+     *
+     * ⚠️ 这里绝不能一进来就无脑 evaluateJavascript。两种情况会让那次调用变成
+     *    **静默的空操作**：页面还没加载完（冷启动），或者当时根本没停在首页
+     *    （比如用户正在读书）—— 这两种情况下 window.RadarPlansOpen 都不存在，
+     *    表现就是"点了通知进来，什么都没发生"。
+     *
+     *    所以钩子带返回值，按结果分三条路：
+     *      ok          → 成了，收工
+     *      no          → 先回首页（面板只在首页上），加载完再试
+     *      还没加载完  → 什么都不做，等 onPageFinished 再调一次这里
+     *
+     *    重试有上限。一个偶发的失败不该变成持续耗电的后台轮询。
+     */
+    private void dispatchPendingPanel() {
+        if (!pendingOpenPlans || !pageLoaded || web == null) {
+            return;
+        }
+        try {
+            web.evaluateJavascript(JS_OPEN_PLANS, new ValueCallback<String>() {
+                @Override
+                public void onReceiveValue(String v) {
+                    // evaluateJavascript 回的是 JSON 串，成功时形如 "ok"（带引号）
+                    if (v != null && v.indexOf("ok") >= 0) {
+                        pendingOpenPlans = false;
+                        panelTriedRoot = false;
+                        panelTries = 0;
+                        return;
+                    }
+                    if (!panelTriedRoot) {
+                        panelTriedRoot = true;
+                        if (web != null) {
+                            web.loadUrl(AppConfig.START_URL);   // onPageFinished 会再调回来
+                        }
+                        return;
+                    }
+                    if (panelTries++ < 8) {
+                        if (web != null) {
+                            web.postDelayed(new Runnable() {
+                                @Override
+                                public void run() {
+                                    dispatchPendingPanel();
+                                }
+                            }, 350);
+                        }
+                        return;
+                    }
+                    pendingOpenPlans = false;      // 放弃，别无限重试
+                }
+            });
+        } catch (Exception ignored) {
+            pendingOpenPlans = false;
+        }
+    }
+
+    /**
+     * 让网页把"提醒"相关的状态重画一遍（页面里没有这个钩子就什么也不做）。
+     *
+     * 用在两个地方：从系统设置页授权回来（onResume）、以及权限弹框有结果时。
+     * 这两种情况下 WebView 自己收不到任何事件（系统设置是另一个 Activity，
+     * 权限框压根不是 Activity），不主动喊一声，页面上的状态就会一直停在旧值。
+     */
+    private void refreshReminderUi() {
+        if (web == null) {
+            return;
+        }
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    web.evaluateJavascript(
+                            "window.RadarReminderRefresh&&window.RadarReminderRefresh()", null);
+                } catch (Exception ignored) {
+                }
+            }
+        });
+    }
+
     // ------------------------------------------------------------------ WebViewClient
     private class Client extends WebViewClient {
 
@@ -880,6 +1314,8 @@ public class MainActivity extends Activity {
         @Override
         public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
             hideOffline();
+            // 页面一开始重载，之前那套 JS 就都不在了 —— 掀面板的钩子自然也没了
+            pageLoaded = false;
         }
 
         @Override
@@ -888,6 +1324,10 @@ public class MainActivity extends Activity {
             if (bar.getProgress() >= 100) {
                 bar.setVisibility(View.GONE);
             }
+            pageLoaded = true;
+            // ⭐ 页面加载完是"掀面板"唯一的可靠时机：这一刻 setupPlans() 才跑过，
+            //    window.RadarPlansOpen 才真的存在。
+            dispatchPendingPanel();
         }
 
         /** 断网 / DNS 失败 / 证书问题 —— 只有主文档失败才盖提示页，图片挂了不该盖。 */
@@ -934,6 +1374,26 @@ public class MainActivity extends Activity {
         return super.onKeyDown(keyCode, event);
     }
 
+    /**
+     * 点通知进来时，如果 App 还活着，走的是这里而不是 onCreate
+     * （MainActivity 是 singleTask）。
+     *
+     * ⚠️ 必须 setIntent：不设的话 getIntent() 一直是**最初那次**的 Intent，
+     *    "这次是点提醒进来的"这个信息当场就丢了 —— 而它的表现恰好是
+     *    "第一次点有效、之后再点就没反应了"，最难查的那一类。
+     */
+    @Override
+    protected void onNewIntent(Intent it) {
+        super.onNewIntent(it);
+        setIntent(it);
+        if (wantsPlans(it)) {
+            pendingOpenPlans = true;
+            panelTriedRoot = false;
+            panelTries = 0;
+            dispatchPendingPanel();
+        }
+    }
+
     @Override
     protected void onResume() {
         super.onResume();
@@ -946,6 +1406,9 @@ public class MainActivity extends Activity {
             pendingApk = null;
             launchInstaller(apk);
         }
+        // 也可能是刚去开通知权限 / 准点提醒权限 / 自启动回来的：让设置页重画一遍状态。
+        // （系统设置页是另一个 Activity，WebView 自己收不到任何事件。）
+        refreshReminderUi();
     }
 
     @Override

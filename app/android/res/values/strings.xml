@@ -28,4 +28,30 @@
     <string name="update_no_installer">系统里没有能安装应用的组件</string>
     <string name="update_auto_started">正在后台下载 v%1$s…</string>
     <string name="update_auto_ready">更新已下好，正在调起安装</string>
+
+    <!-- 规划到期提醒（系统通知）。
+         追求的效果是"跟微信来消息一样"：顶上弹出来、有声有震动、留在通知栏。
+         所以渠道的 importance 必须是 HIGH —— DEFAULT 只是条不出声的横幅，
+         达不到用户要的那个效果。
+
+         文案里刻意不写"提醒您"这类敬语，用"别忘了"这种日常说法，
+         和面板里的语气保持一致。 -->
+    <string name="notify_channel">规划提醒</string>
+    <string name="notify_channel_desc">规划到期当天早上 9:00 提醒你</string>
+    <string name="notify_due_one">「%1$s」今天到期</string>
+    <string name="notify_due_many">%1$d 条规划今天到期</string>
+    <string name="notify_due_text_one">今天到期了，别忘了</string>
+
+    <!-- 测试提醒：设置页那个按钮发出来的，内容和真的到期提醒长得一样 -->
+    <string name="notify_test_title">规划提醒（测试）</string>
+    <string name="notify_test_text">提醒是通的 —— 到期那天就会这样弹出来</string>
+    <string name="notify_test_big">这是一条测试提醒。\n到期的规划会在当天早上 9:00 用这条通知提醒你，点开直接进规划面板。</string>
+
+    <!-- 授权过程里的反馈。给不出通知权限时必须说清楚，不能"点了没反应" -->
+    <string name="notify_need_perm">需要先允许「发送通知」，授权后到期才提醒得到你</string>
+    <string name="notify_granted">已开启通知提醒</string>
+    <string name="notify_denied">没给通知权限，到期提醒发不出来</string>
+    <string name="notify_test_failed">发不出来 —— 检查一下通知权限</string>
+    <string name="notify_already">通知权限本来就是开的</string>
+    <string name="notify_no_autostart_page">这台手机没有自启动设置页，去应用详情里找「自启动 / 后台运行」</string>
 </resources>

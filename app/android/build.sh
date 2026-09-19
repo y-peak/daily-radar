@@ -182,14 +182,23 @@ fi
 
 # ---------------------------------------------------------------- 准备构建目录
 echo "· 构建目录 $B"
-# ⚠️ 这里刻意**不写成 `rm -rf "$BU"`**，两个理由：
-#   1. 没必要 —— java/ 和 res_src/ 都是全量覆盖，只有编译产物会残留；
-#   2. 整目录删除在受限的执行环境里会被**批量删除防护**拦下
-#      （"SAFE_DELETE_BULK_CONFIRM_REQUIRED"），构建脚本因此整个跑不起来。
-#      构建脚本不该被这种外部策略弄成不可用 —— 把清理范围收窄到真正需要清的。
-rm -rf "$BU/classes" "$BU/dex" "$BU/gen"
-rm -f "$BU/sources.txt" "$BU/classes.txt" "$BU/res.zip" "$BU/base.apk" \
-      "$BU/unsigned.apk" "$BU/aligned.apk"
+# ⚠️⚠️ 这一步**刻意一次删除都不做**，只建目录。理由不是省事，是这套脚本得能用：
+#
+#   1. 目录级的删除（`rm -rf "$BU"`、`rm -rf "$BU/classes"` …）会被执行环境的
+#      **批量删除防护**拦下（"SAFE_DELETE_BULK_CONFIRM_REQUIRED"：单次上限 50，
+#      而且是**按轮次累计**的）。表现是整个构建脚本静默中止、APK 一个都出不来，
+#      而报错信息看起来跟安卓、跟代码都毫无关系。
+#      构建脚本不该被一条外部策略弄成不可用 —— 那是把风险转嫁给了"下次想发版的人"。
+#
+#   2. 其实压根不需要删：构建目录里**每一个产物都是被全量覆盖的** ——
+#      res/、AndroidManifest、*.java 都是全量拷贝；res.zip / base.apk /
+#      unsigned.apk / aligned.apk / sources.txt / classes.txt / classes.dex
+#      都是"写"而不是"追加"。
+#
+#   3. 唯一真正的风险是**陈旧产物**：仓库里删掉了某个 .java，构建目录里却还留着
+#      上次编出来的 .class，d8 会把它一起打进 APK（然后装到手机上才发现）。
+#      这个风险不靠"每次先删干净"来防 —— 那正是第 1 条要避开的动作 ——
+#      而是靠下面两道**守卫**，把它变成一次看得见的失败。
 mkdir -p "$BU/res_src" "$BU/java/com/ypeak/radar" "$BU/gen" "$BU/classes" "$BU/dex"
 
 # 源码拷到 ASCII 路径（见文件头 ⚠️1），顺便注入口令
@@ -214,10 +223,29 @@ done
 # ⚠️ 这里只列**手写的**类。AppConfig 是下一步由模板生成的，
 #    此刻还不存在 —— 把它列进来只会让构建永远失败。
 #    （AppConfig 由后面的"逐字段核对"负责，那份检查更严：它比对的是内容。）
-for cls in MainActivity ApkProvider; do
+# ⚠️ 新增类时**必须**同步加到这个列表里。PlanAlarmReceiver 是"被 manifest
+#    引用"的类型 —— 漏拷它的话 javac 根本不会报错（没人 new 它），
+#    编译一路通过，装到手机上才发现开机/到点时接收器不存在。
+for cls in MainActivity ApkProvider Notifier PlanReminder PlanAlarmReceiver; do
     [ -f "$BU/java/com/ypeak/radar/$cls.java" ] \
         || { echo "✗ 构建目录里缺 $cls.java（新增类时忘了拷？）" >&2; exit 1; }
 done
+
+# ---------------------------------------------------------------- 陈旧产物守卫（一）：资源
+# 仓库里已经删掉的资源，不该还留在构建目录里被 aapt2 打进去。
+# 不删、只报 —— 报出来的话，清理构建目录是人的决定，不是脚本悄悄替他做的。
+_stale_res=""
+while IFS= read -r _f; do
+    [ -f "$HERE/res/${_f#"$BU/res_src/"}" ] || _stale_res="$_stale_res ${_f#"$BU/res_src/"}"
+done < <(find "$BU/res_src" -type f)
+if [ -n "$_stale_res" ]; then
+    cat >&2 <<MSG
+✗ 构建目录里有仓库中已不存在的资源：$_stale_res
+  它们是上一次构建的残留，直接编进去会让 APK 里出现"已经删掉的东西"。
+  处理：把 $BU/res_src 里这些文件删掉（或整个构建目录清空）后重跑。
+MSG
+    exit 1
+fi
 
 # ---------------------------------------------------------------- 由模板生成 AppConfig
 # ⚠️ 注入前必须转义 sed 的替换串：
@@ -282,6 +310,29 @@ javac -encoding UTF-8 -nowarn \
     -source 8 -target 8 -bootclasspath "$ANDROID_JAR" \
     -d "$B/classes" "@$B/sources.txt"
 
+# ---------------------------------------------------------------- 陈旧产物守卫（二）：类
+# ⚠️ 这条守卫是"不删构建目录"这个决定的前提，不能省。
+#    仓库里删掉/改了名的 .java，构建目录里还会留着上次的 .class ——
+#    d8 照样把它打进 APK，编译**一声不响**，而手机上那个类还在。
+#    这里把每一份 .class 反查回源码：找不到源码就是残留，当场拦下。
+#    （内部类 X$1 取顶层名 X 再查；R.java 由 aapt2 生成在 gen/ 下。）
+_stale_cls=""
+while IFS= read -r _c; do
+    _top="$(printf '%s' "$(basename "$_c" .class)" | sed 's/\$.*$//')"
+    if [ ! -f "$BU/java/com/ypeak/radar/$_top.java" ] \
+       && [ ! -f "$BU/gen/com/ypeak/radar/$_top.java" ]; then
+        _stale_cls="$_stale_cls $_top"
+    fi
+done < <(find "$BU/classes" -name '*.class')
+if [ -n "$_stale_cls" ]; then
+    cat >&2 <<MSG
+✗ 构建目录里有**没有源码对应**的 .class：$_stale_cls
+  它们是上一次构建留下的，会被 d8 一起打进 APK（编译不报错，装到手机上才发现）。
+  处理：把 $BU/classes 清空（或删掉上面那几个 .class）后重跑。
+MSG
+    exit 1
+fi
+
 # ---------------------------------------------------------------- 4/6 dex
 echo "· 4/6 d8"
 find "$B/classes" -name '*.class' > "$BU/classes.txt"
@@ -332,12 +383,12 @@ SIGNED_WIN="$B/radar-$VERSION_NAME.apk"
     --out "$SIGNED_WIN" "$B/aligned.apk"
 
 # 从 ASCII 构建目录拷回仓库（产物走的是 cp，不经过 Windows 程序，中文路径无妨）
-# ⚠️ 用 `rm -f` 按名字清，不写 `rm -rf "$HERE/dist"`：
-#    dist/ 里只有上一轮的 apk + sidecar 两三个文件，按名清就够；
-#    而目录级 rm -rf 会被批量删除防护拦下（构建到这一步白跑一次，很冤）。
+# ⚠️ 这里**不删 dist/ 里的旧包**，只覆盖本次这两个文件名。
+#    删的那一行同样会被批量删除防护拦下（见"准备构建目录"那段的长注释）。
+#    代价是 dist/ 会按版本号累积几个百来 KB 的旧包 —— 而 dist/ 在 .gitignore 里，
+#    既不会入库也不会影响任何路由，比"构建因为删文件而整个跑不起来"划算得多。
+#    （真正对外提供下载的是服务器上的 <root>/apk/，那边按版本留档本来就是有意的。）
 mkdir -p "$HERE/dist"
-rm -f "$HERE/dist"/radar-*.apk "$HERE/dist"/radar-*.apk.idsig \
-      "$HERE/dist"/radar-*.json
 OUT="$HERE/dist/radar-$VERSION_NAME.apk"
 cp "$BU/radar-$VERSION_NAME.apk" "$OUT"
 
@@ -377,8 +428,10 @@ cat > "$SIDECAR" <<JSON
 JSON
 echo "  版本元数据 → $SIDECAR (versionCode=$VERSION_CODE)"
 
-# 记下这次构建的版本，供下次自动递增。**必须写在 dist/ 之外** ——
-# dist/ 每次构建都被 `rm -rf` 掉，放里面等于没记。
+# 记下这次构建的版本，供下次自动递增。**放在 dist/ 之外** ——
+# dist/ 是构建产物目录（.gitignore 里），里面按版本号累积着历次产物，
+# 把"上一版是什么"这种**状态**混在产物堆里，迟早会被人连产物一起清掉。
+# 这个文件必须比产物活得久：它是版本号单调递增的唯一依据（见文件头的 ⚠️）。
 printf '%s %s\n' "$VERSION_CODE" "$VERSION_NAME" > "$LAST_FILE"
 echo "  已记录版本 → $LAST_FILE ($VERSION_CODE $VERSION_NAME)"
 

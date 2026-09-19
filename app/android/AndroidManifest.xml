@@ -47,6 +47,28 @@
     <!-- 手机（竖屏为主），不需要任何硬件特性，别让应用商店/系统误判为不兼容 -->
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
 
+    <!--
+      规划到期提醒（原生系统通知）需要下面三个权限。
+
+      · POST_NOTIFICATIONS —— API 33 起发通知要的**运行时权限**（要弹框问，
+        不是装上就有）。API 32 及之前装在包里就等于给了，但代码里照样要查
+        "系统设置里有没有被关掉"，见 Notifier.canNotify()。
+
+      · RECEIVE_BOOT_COMPLETED —— 闹钟**不跨重启存活**。没有它，
+        手机重启一次之后提醒就永久没了，而且不会报任何错（最阴的一类失效）。
+        这是普通权限，装上就有，不用动态申请。
+
+      · SCHEDULE_EXACT_ALARM —— "准点响"要的特殊权限（API 31 起）。
+        ⚠️ Android 14 起**新装应用默认拿不到**，setExact* 会直接抛
+        SecurityException。所以代码里必须先 canScheduleExactAlarms() 问一句，
+        拿不到就退化成不精确闹钟（一定会响、但可能晚一些），
+        并把这件事如实显示在设置页上 + 给一个"去开启"的入口。
+        声明它不会有害：用户不给，也只是降级而已。
+    -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+
     <application
         android:label="@string/app_name"
         android:icon="@mipmap/ic_launcher"
@@ -93,5 +115,36 @@
             android:authorities="com.ypeak.radar.apk"
             android:exported="false"
             android:grantUriPermissions="true" />
+
+        <!--
+          规划到期提醒的接收器。两个职责：
+            1. 到期闹钟响的时候发通知（action 见 PlanReminder.ACTION_DUE，
+               由我们自己的 PendingIntent 显式指名送过来，不需要 intent-filter）
+            2. 在所有"排好的闹钟已经失效"的时机重排 —— 开机、覆盖安装、
+               改系统时间、换时区、以及"闹钟与提醒"权限刚被授予
+
+          ⚠️ exported 这里**必须写 true**，不能想当然地用 false。
+             官方 <receiver> 文档的字面意思是"false 时仍能收到系统发出的消息"，
+             但社区里大量实例反馈 targetSdk 31+ 上 BOOT_COMPLETED 会因此收不到；
+             而收不到的后果是静默的（重启后提醒永久失效，不报错）。
+             两边的代价完全不对称，所以选"一定能收到"的那边。
+
+             代价是别的应用也能往这里发广播。但这个接收器本身就是**幂等**的：
+             它在 for 的只有"今天有没有到期未完成的规划"这一个事实 ——
+             没有就什么都不做；有的话，那也正好是它本来就该发的那条通知。
+             伪造成功最多让人看到一条自己应得的提醒，拿不到任何额外能力。
+        -->
+        <receiver
+            android:name=".PlanAlarmReceiver"
+            android:exported="true"
+            android:enabled="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.TIME_SET" />
+                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+                <action android:name="android.app.action.SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>
