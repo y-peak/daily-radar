@@ -2993,6 +2993,15 @@ try:
           lambda: has("briefTest.disabled = true", _js4))
     check("旧壳没有 briefInfo 时说清是旧壳，不指错地方",
           lambda: has("这台 App 还是旧版本，没有每日简报能力", _js4))
+    # ⚠️ 说明的优先顺序：**先看有没有安排，再看发不发得出去**。
+    #    反过来写的话，三档全关时会显示"通知权限没开，简报发不出来"——
+    #    那是在说一个本来就没人要的功能坏了，用户只会去折腾一个与他的
+    #    意图无关的开关。顺序反了不会报错，只会说错话。
+    check("⭐ 说明先判「有没有开着的档」，再判通知权限（否则三档全关也在喊权限）",
+          lambda: _js4.index("if (!anyOn) {", _js4.index("function paintBrief"))
+          < _js4.index("if (!info.notify) {", _js4.index("function paintBrief")))
+    check("三档全关时说的是「三档都关着」而不是权限",
+          lambda: has("三档都关着", _js4))
     check("设置页有 #set-brief", lambda: has('id="set-brief"', _set3))
     check("⭐ 简报区块也在 #set-native 里（浏览器里不显示点了没用的开关）",
           lambda: _set3.index('id="set-native"') < _set3.index('id="set-brief"'))

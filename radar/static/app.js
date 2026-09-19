@@ -974,11 +974,18 @@
       if (briefPerm) briefPerm.hidden = !!info.notify;
       if (briefExactBtn) briefExactBtn.hidden = !!info.exact;
 
+      /* 说明的**优先顺序是有讲究的**：先看"有没有安排"，
+         再看"安排了但发不出去"。
+
+         ⚠️ 别把 `!info.notify` 提到前面：三档全关的时候，用户看到的是
+         "通知权限没开，简报发不出来" —— 那是在说一个**本来就没人要的功能坏了**，
+         他只会以为坏了，然后去折腾一个跟他的意图毫无关系的开关。
+         三档全关时唯一该说的是"你没开任何一档"。 */
       var m;
-      if (!info.notify) {
-        m = "通知权限没开，简报发不出来。";
-      } else if (!anyOn) {
+      if (!anyOn) {
         m = "三档都关着 —— 打开哪一档，就会在那个时刻收到一条。";
+      } else if (!info.notify) {
+        m = "通知权限没开，简报发不出来。";
       } else if (!info.exact) {
         m = "系统没给「闹钟与提醒」权限，简报照样会响，但可能晚一会儿。";
       } else {

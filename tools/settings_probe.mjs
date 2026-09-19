@@ -154,6 +154,59 @@ const STUB_REMIND = `(() => {
   });
 })();`;
 
+/* ---------------- 给 STUB **补上**每日简报能力 ----------------
+   和提醒那份同一个套路：做成补丁，因为前半段要验**没有简报能力的旧壳**
+   —— 页面先更新、App 后更新，这个状态在用户手机上必然会出现。
+
+   三个时段的初值刻意**不都一样**：早间开着且已排程、尾盘关着、收盘开着但
+   "还没排到"（when 为空）。这样三种显示状态（「下一次 …」/「已关闭」/
+   「已开启，稍后重排」）能在同一次运行里都被看见 —— 尤其是最后那种：
+   原生说"还没排"的时候，网页**绝不能自己算一个时刻填上去**，
+   算了就必然和闹钟对不上，而对不上的表现是"设置页写着 8:00、实际没响"。 */
+const STUB_BRIEF = `(() => {
+  if (!window.RadarNative) return;
+  const calls = window.__calls;
+  window.__brief = {
+    notify: false, exact: false, anyOn: true,
+    slots: [
+      { key: "morning",  label: "早间", on: true,  h: 8,  m: 0,  when: "9月20日 08:00" },
+      { key: "intraday", label: "尾盘", on: false, h: 14, m: 30, when: "" },
+      { key: "close",    label: "收盘", on: true,  h: 16, m: 40, when: "" }
+    ]
+  };
+  window.__testCode = "ok";
+  window.__briefCalls = [];
+  Object.assign(window.RadarNative, {
+    briefInfo: () => JSON.stringify(window.__brief),
+    /* ⭐ 桩必须**真的把写入吞进去**，不能只记一笔就完事。
+       真实原生存住之后会重排，下一次读到的就是新时刻；桩要是只记事不生效，
+       页面里"存住之后从原生重读"这条纪律就验不出来 —— 而那正是这块的核心：
+       页面上显示的每一个值都得能从原生再读出来一遍。 */
+    setBrief: (json) => {
+      calls.push("setBrief");
+      window.__briefCalls.push(json);
+      try {
+        const o = JSON.parse(json);
+        Object.keys(o).forEach((k) => {
+          const s = (window.__brief.slots || []).filter((x) => x.key === k)[0];
+          if (s) { s.on = !!o[k].on; s.h = o[k].h; s.m = o[k].m; }
+        });
+      } catch (e) {}
+      return true;
+    },
+    testBrief: (slot) => {
+      calls.push("testBrief:" + slot);
+      /* ⭐ 在**调用当中**抓两个事实：按钮有没有禁用、状态行说的是不是
+         "正在取…"。取简报要连服务器十几秒，这期间没反馈就等于点了没反应。
+         同步桩里这两件事发生完就没了，只能在里面抓。 */
+      const b = document.getElementById("brief-test");
+      window.__busy = { disabled: !!(b && b.disabled),
+                        msg: (document.getElementById("set-msg") || {}).textContent || "" };
+      return window.__testCode;
+    }
+  });
+})();`;
+
 /* ---------------- 页面内取值：一律自包含，返回基本类型 ---------------- */
 const snap = `(() => {
   const t = (id) => { const e = document.getElementById(id); return e ? e.textContent : null; };
@@ -365,6 +418,202 @@ const snap = `(() => {
     r.msg.indexOf("自启动") !== -1, r.msg);
 
   await send("Page.removeScriptToEvaluateOnNewDocument", { identifier: inj3.identifier });
+
+  // =============================================================== C3. 每日简报
+  //
+  // 同样两种壳都要验。这块比规划提醒多一层风险：时刻是原生存的，
+  // 网页只许**显示和回写** —— 一旦网页自己算一遍，就必然和闹钟对不上，
+  // 而对不上的表现是"设置页写着 8:00、实际没响"，属于最难查的那类。
+  console.log("\n== C3. 每日简报（三个时段）==");
+
+  const snapBrief = `(() => {
+    const el = (id) => document.getElementById(id);
+    const t = (id) => { const e = el(id); return e ? e.textContent : null; };
+    const vis = (id) => !!el(id) && !el(id).hidden;
+    const rows = [].slice.call(document.querySelectorAll("#brief-rows .brief-row"));
+    const out = { slots: [], at: {}, on: {}, when: {}, off: {}, label: {} };
+    rows.forEach((r) => {
+      const k = r.getAttribute("data-slot");
+      out.slots.push(k);
+      const a = el("brief-at-" + k), c = el("brief-on-" + k);
+      out.at[k] = a ? a.value : null;
+      out.on[k] = c ? c.checked : null;
+      out.when[k] = t("brief-when-" + k);
+      out.label[k] = (r.querySelector(".set-name") || {}).textContent || null;
+      out.off[k] = r.classList.contains("is-off");
+    });
+    const all = [].slice.call(document.querySelectorAll("#brief-rows .brief-row"));
+    return {
+      slots: out.slots, at: out.at, on: out.on, when: out.when,
+      off: out.off, label: out.label, rowCount: all.length,
+      msg: t("brief-msg"), setMsg: t("set-msg"),
+      setMsgClass: el("set-msg") ? el("set-msg").className : "",
+      testShown: vis("brief-test"),
+      permShown: vis("brief-perm"), exactShown: vis("brief-exact"),
+      busy: window.__busy || null,
+      calls: (window.__calls || []).slice(),
+      briefCalls: (window.__briefCalls || []).slice()
+    };
+  })()`;
+
+  // ---- C3a. 旧壳：桥上没有 briefInfo（就是用户手机上还会装的 v1.7）
+  const inj4 = await send("Page.addScriptToEvaluateOnNewDocument", { source: STUB });
+  await goto("/settings/?pass=c3a");
+  let b = await evalJs(snapBrief);
+  check("简报旧壳：明说是 App 旧版本，而不是说「没权限」",
+    typeof b.msg === "string" && b.msg.indexOf("旧版本") !== -1, b.msg);
+  check("简报旧壳：说清了更新之后就有", b.msg.indexOf("更新") !== -1, b.msg);
+  check("简报旧壳：一行都不画（不摆点了没用的开关）",
+    b.rowCount === 0, b.rowCount);
+  check("简报旧壳：测试/权限/准点三个按钮全收起",
+    !b.testShown && !b.permShown && !b.exactShown,
+    [b.testShown, b.permShown, b.exactShown]);
+
+  // ---- C3b. 有简报能力的壳
+  const inj5 = await send("Page.addScriptToEvaluateOnNewDocument", { source: STUB_REMIND });
+  const inj6 = await send("Page.addScriptToEvaluateOnNewDocument", { source: STUB_BRIEF });
+  await goto("/settings/?pass=c3b");
+  b = await evalJs(snapBrief);
+  check("三行都画出来了，顺序就是早/尾/收",
+    b.slots.join(",") === "morning,intraday,close", b.slots);
+  check("行数正好 3（没有多画一遍）", b.rowCount === 3, b.rowCount);
+  check("时段名来自原生",
+    b.label.morning === "早间简报" && b.label.intraday === "尾盘简报"
+      && b.label.close === "收盘简报", b.label);
+  check("⭐ 时刻来自原生，网页不许自己算（08:00 / 14:30 / 16:40）",
+    b.at.morning === "08:00" && b.at.intraday === "14:30" && b.at.close === "16:40",
+    b.at);
+  check("开关状态来自原生",
+    b.on.morning === true && b.on.intraday === false && b.on.close === true, b.on);
+  check("关掉的那一档整行压暗", b.off.intraday === true && b.off.morning === false,
+    b.off);
+  check("关掉的那一档写「已关闭」", b.when.intraday === "已关闭", b.when.intraday);
+  check("已排程的那一档写「下一次 …」",
+    b.when.morning === "下一次 9月20日 08:00", b.when.morning);
+  check("⭐ 原生说「还没排到」时不许自己编一个时刻",
+    b.when.close === "已开启，稍后重排", b.when.close);
+  check("没通知权限 → 摆出开启按钮", b.permShown);
+  check("说明里点出「通知权限没开」", b.msg.indexOf("通知权限") !== -1, b.msg);
+  check("有自启动限制就一并说（那是系统层面的限制）",
+    b.msg.indexOf("自启动") !== -1, b.msg);
+
+  // ---- ⭐ 三行只画一次：重画不许重建节点（重建会把正在输入的时刻打断）
+  await evalJs(`window.__row0 = document.querySelector("#brief-rows .brief-row")`);
+  await evalJs(`window.RadarReminderRefresh()`);
+  await sleep(120);
+  const sameRow = await evalJs(
+    `document.querySelector("#brief-rows .brief-row") === window.__row0`);
+  b = await evalJs(snapBrief);
+  check("⭐ 重画复用同一批节点（正在输入的时刻不会被打断）", sameRow === true, sameRow);
+  check("重画也不会多出一行", b.rowCount === 3, b.rowCount);
+
+  // ---- 改时刻：必须落回原生，而且带的是新时刻
+  await evalJs(`(() => {
+    const a = document.getElementById("brief-at-close");
+    a.value = "17:05";
+    a.dispatchEvent(new Event("change", { bubbles: true }));
+  })()`);
+  await sleep(150);
+  b = await evalJs(snapBrief);
+  let last = b.briefCalls.length ? JSON.parse(b.briefCalls[b.briefCalls.length - 1]) : {};
+  check("改时刻 → 调了 setBrief", b.briefCalls.length >= 1, b.briefCalls.length);
+  check("⭐ 回写的是完整三档（只有一条写入路径，没有改一半的状态）",
+    b.briefCalls.length >= 1
+      && ["morning", "intraday", "close"].every((k) => last[k]), last);
+  check("回写的时刻就是刚改的那个（收盘 17:05）",
+    last.close && last.close.h === 17 && last.close.m === 5, last.close);
+  check("改完给了「已保存」反馈",
+    typeof b.setMsg === "string" && b.setMsg.indexOf("已保存") !== -1
+      && b.setMsgClass.indexOf("is-ok") !== -1, [b.setMsg, b.setMsgClass]);
+
+  // ---- ⭐ 清空时刻框：绝不能当成 0:00 存进去（那会变成半夜弹一条）
+  const before = b.briefCalls.length;
+  await evalJs(`(() => {
+    const a = document.getElementById("brief-at-close");
+    a.value = "";
+    a.dispatchEvent(new Event("change", { bubbles: true }));
+  })()`);
+  await sleep(150);
+  b = await evalJs(snapBrief);
+  check("⭐ 时刻框清空 → 不写进原生（否则会变成 0:00 半夜弹一条）",
+    b.briefCalls.length === before, [before, b.briefCalls.length]);
+  check("⭐ 清空时如实说「时刻填得不对」，不假装存住了",
+    typeof b.setMsg === "string" && b.setMsg.indexOf("时刻") !== -1
+      && b.setMsgClass.indexOf("is-warn") !== -1, [b.setMsg, b.setMsgClass]);
+  check("⭐ 清空后从原生重读，输入框回到原来的 17:05（不留在空框上）",
+    b.at.close === "17:05", b.at.close);
+
+  // ---- 关掉一档
+  await evalJs(`document.getElementById("brief-on-morning").click()`);
+  await sleep(150);
+  b = await evalJs(snapBrief);
+  last = JSON.parse(b.briefCalls[b.briefCalls.length - 1]);
+  check("关掉早间 → 回写里早间 on=false 且其他档不变",
+    last.morning && last.morning.on === false
+      && last.intraday && last.intraday.on === false
+      && last.close && last.close.on === true, last);
+  check("关掉后那一行立刻压暗", b.off.morning === true, b.off);
+  check("关掉后那一行写「已关闭」", b.when.morning === "已关闭", b.when.morning);
+
+  await evalJs(`document.getElementById("brief-on-close").click()`);
+  await sleep(150);
+  b = await evalJs(snapBrief);
+  check("三档全关时说明改口（不再说「到点会收到一条」）",
+    typeof b.msg === "string" && b.msg.indexOf("三档都关着") !== -1, b.msg);
+
+  // ---- 「立刻取一条看看」
+  await evalJs(`document.getElementById("brief-on-morning").click()`);
+  await sleep(150);
+  b = await evalJs(snapBrief);
+  check("重新打开早间后又是开着的", b.on.morning === true);
+  await evalJs(`document.getElementById("brief-test").click()`);
+  await sleep(200);
+  b = await evalJs(snapBrief);
+  check("点测试 → 取的是**第一个开着**的时段（早间，不是收盘）",
+    b.calls.indexOf("testBrief:morning") !== -1, b.calls);
+  check("⭐ 取的过程中按钮禁用（十几秒没反馈 = 用户以为点了没反应）",
+    !!b.busy && b.busy.disabled === true, b.busy);
+  check("⭐ 取的过程中状态行说「正在取…」",
+    !!b.busy && b.busy.msg.indexOf("正在取") !== -1, b.busy && b.busy.msg);
+  check("成功后告诉用户去通知栏看",
+    typeof b.setMsg === "string" && b.setMsg.indexOf("通知栏") !== -1
+      && b.setMsgClass.indexOf("is-ok") !== -1, [b.setMsg, b.setMsgClass]);
+  check("取完按钮恢复可用", b.testShown === true);
+
+  // ---- 结果码要逐个说人话（四种结果不能都显示成同一句）
+  const codes = [
+    ["nonotify", "没开", "is-warn"],
+    ["nofetch", "没取到", "is-warn"],
+    ["dup", "已经发过", "is-ok"],
+  ];
+  for (const [code, word, cls] of codes) {
+    await evalJs(`window.__testCode = ${JSON.stringify(code)}`);
+    await evalJs(`document.getElementById("brief-test").click()`);
+    await sleep(200);
+    b = await evalJs(snapBrief);
+    check(`结果码 ${code} → 说「${word}」`,
+      typeof b.setMsg === "string" && b.setMsg.indexOf(word) !== -1
+        && b.setMsgClass.indexOf(cls) !== -1, [b.setMsg, b.setMsgClass]);
+  }
+
+  // ---- 权限齐备：两个引导按钮自己收起，说明也不再提「可能晚一会儿」
+  await evalJs(`
+    window.__testCode = "ok";
+    Object.assign(window.__brief, { notify: true, exact: true });
+    window.RadarReminderRefresh();
+  `);
+  await sleep(150);
+  b = await evalJs(snapBrief);
+  check("通知/准点权限齐备 → 两个引导按钮都收起",
+    !b.permShown && !b.exactShown, [b.permShown, b.exactShown]);
+  check("说明改成「到点会去服务器取一次」",
+    typeof b.msg === "string" && b.msg.indexOf("服务器") !== -1, b.msg);
+  check("权限齐备后不再提「通知权限没开」",
+    b.msg.indexOf("通知权限没开") === -1, b.msg);
+
+  await send("Page.removeScriptToEvaluateOnNewDocument", { identifier: inj4.identifier });
+  await send("Page.removeScriptToEvaluateOnNewDocument", { identifier: inj5.identifier });
+  await send("Page.removeScriptToEvaluateOnNewDocument", { identifier: inj6.identifier });
 
   // =============================================================== D. 无异常
   console.log("\n== D. 页面无 JS 异常 ==");
