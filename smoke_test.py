@@ -1735,13 +1735,42 @@ try:
     check("桥暴露 openInstallSettings", lambda: has("void openInstallSettings()", _act))
     check("桥暴露 downloadUpdate", lambda: has("void downloadUpdate()", _act))
 
-    # 构建侧：新增类必须被拷进构建目录。
+    # 构建侧：**磁盘上每一个手写类**都必须被拷进构建目录。
     # ⚠️ 这里防的是"写死了只拷 MainActivity.java"这类漏编 ——
-    # ContentProvider 是被清单引用的，javac 不会检查它，漏了也能编译通过。
-    check("build.sh 整目录拷 java（不写死文件名）",
-          lambda: has('cp -r "$HERE/java/." ', _build))
-    check("build.sh 点名确认新类在构建目录",
-          lambda: has("ApkProvider", _build))
+    # ContentProvider 是被清单引用的，javac 不会检查它，漏了也能编译通过，
+    # 装到手机上一点才发现崩。
+    #
+    # ⭐ 断言**不绑具体写法**：最早绑的是 `cp -r "$HERE/java/."`，后来为了
+    #    少一次无谓的删除（模板 *.java.in 不参与编译），改成按通配拷 *.java ——
+    #    机制变了、意图没变。绑死机制会让"改进脚本"变成"改测试"，
+    #    久而久之就没人敢动脚本了。
+    #    所以改成从**文件系统**推导期望：加一个新类却忘了同步进点名校验，这里就红。
+    _java_dir = _app_dir / "java/com/ypeak/radar"
+    _handwritten = sorted(p.stem for p in _java_dir.glob("*.java"))
+    check("build.sh 按通配拷贝 java（不是写死文件名）",
+          lambda: has("java/com/ypeak/radar/*.java", _build))
+    check(f"build.sh 点名校验覆盖全部手写类 {_handwritten}",
+          lambda: all(has(cls, _build) for cls in _handwritten))
+
+    # ⚠️⚠️ 构建脚本里不能出现**目录级 rm -rf** —— 实测会被批量删除防护
+    #    拦下（SAFE_DELETE_BULK_CONFIRM_REQUIRED），整条构建链直接断掉、
+    #    一个 APK 都出不来。只清本轮的编译产物 + 按文件名清 dist。
+    #
+    # ⚠️ 这里必须**先剥掉注释**再断言"某字符串不该出现"：
+    #    上面那两行说明里就写着 `rm -rf "$BU"`，直接搜正文会永远命中。
+    #    （顺带记一个坑：不能写成 `not has(...)` —— has() 找不到时是**抛异常**、
+    #     不是返回 False，所以 `not has(x)` 的意思恰好反过来：它要求 x 必须存在。
+    #     要断"不存在"就用 `x in code` 配 eq 定成 False。）
+    _build_code = "\n".join(
+        ln for ln in _build.splitlines() if not ln.lstrip().startswith("#"))
+    check("⭐ build.sh 不整目录 rm -rf 构建目录",
+          lambda: eq('rm -rf "$BU"' in _build_code, False))
+    check("⭐ build.sh 不整目录 rm -rf dist",
+          lambda: eq('rm -rf "$HERE/dist"' in _build_code, False))
+    check("build.sh 不再写死拷单个类",
+          lambda: eq("java/com/ypeak/radar/MainActivity.java" in _build_code, False))
+    check("build.sh 按文件名清 dist",
+          lambda: has('rm -f "$HERE/dist"/radar-*.apk', _build))
 
     # --- 5. 版本前进（写侧）—— 否则线上"最新版"会被更旧的包顶掉 ---
     check("build.sh 版本自动递增", lambda: has("LAST_CODE + 1", _build))
