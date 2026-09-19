@@ -749,6 +749,156 @@
     readSave(s);
   }
 
+  /* ---------------- 阅读位置：记住"这一章读到哪儿" ----------------
+     为什么存**百分比**就够，而不去存"某个小节的 id"：
+     书稿是按 commit 钉死的（见 books.py），同一章的排版不会变，
+     所以"屏高的百分之几"在同一台设备上是稳定的。
+     反而用锚点会更差 —— 当你停在某个标题下面几千字处时，
+     按锚点恢复会把你**拉回到那个标题**，等于每次都在往回跳。
+     小节名只用来做显示用的小标签（"1.2 张量并行"），不参与定位。 */
+  function readPos(b, chap) {
+    if (!b || !b.pos || typeof b.pos !== "object") return null;
+    var p = b.pos[chap];
+    return (p && typeof p.p === "number") ? p : null;
+  }
+
+  function readPosSet(book, bookTitle, chap, chapTitle, p, label) {
+    var s = readStore();
+    var b = readBook(s, book, bookTitle);
+    if (!b.pos || typeof b.pos !== "object") b.pos = {};
+    b.pos[chap] = {
+      p: Math.round(Math.max(0, Math.min(100, p)) * 10) / 10,
+      label: label || "",
+      t: chapTitle || "",
+      at: Date.now()
+    };
+    readSave(s);
+    return b.pos[chap];
+  }
+
+  /* ---------------- 书签 ---------------- */
+  function readMarks(b) {
+    return (b && b.marks && b.marks.length) ? b.marks : [];
+  }
+
+  function markFind(b, chap, p) {
+    /* 同一章里位置几乎相同就算同一个书签 ——
+       否则连点几下会堆出一串几乎重合的条目，列表立刻变成噪音。 */
+    var arr = readMarks(b), i, m;
+    for (i = 0; i < arr.length; i++) {
+      m = arr[i];
+      if (m.chap === chap && Math.abs((m.p || 0) - p) < 2.5) return m;
+    }
+    return null;
+  }
+
+  function markAdd(book, bookTitle, chap, chapTitle, p, label) {
+    var s = readStore();
+    var b = readBook(s, book, bookTitle);
+    if (!b.marks || !b.marks.length) b.marks = [];
+    var dup = markFind(b, chap, p);
+    if (dup) return null;
+    b.marks.push({
+      id: "m" + Date.now() + "-" + b.marks.length,
+      chap: chap, t: chapTitle || "", label: label || "",
+      p: Math.round(Math.max(0, Math.min(100, p)) * 10) / 10,
+      at: Date.now()
+    });
+    readSave(s);
+    return b.marks[b.marks.length - 1];
+  }
+
+  function markRemove(book, id) {
+    var s = readStore();
+    var b = readBook(s, book, "");
+    if (!b.marks || !b.marks.length) return false;
+    var n = b.marks.length;
+    b.marks = b.marks.filter(function (m) { return m.id !== id; });
+    if (b.marks.length === n) return false;
+    readSave(s);
+    return true;
+  }
+
+  /* 相对时间：书签列表里"3 天前"比一个完整时间戳更好扫 */
+  function agoOf(ts) {
+    var d = Date.now() - (ts || 0);
+    if (d < 60000) return "刚刚";
+    if (d < 3600000) return Math.floor(d / 60000) + " 分钟前";
+    if (d < 86400000) return Math.floor(d / 3600000) + " 小时前";
+    if (d < 2592000000) return Math.floor(d / 86400000) + " 天前";
+    return new Date(ts).toLocaleDateString("zh-CN");
+  }
+
+  /* 把一本书的书签渲染进列表。章节页和目录页共用同一份实现 ——
+     两处各写一遍必然会漂移（一个按时间倒序、一个忘了转义…）。 */
+  function renderBookmarks(book, listEl, emptyEl, badgeEl) {
+    if (!listEl) return 0;
+    var b = readStore()[book] || {};
+    var marks = readMarks(b).slice();
+    /* 最近加的排最前 —— 刚存的书签应该一眼看到 */
+    marks.sort(function (x, y) { return (y.at || 0) - (x.at || 0); });
+
+    listEl.textContent = "";
+    var i, m, li, a, del, t, meta;
+    for (i = 0; i < marks.length; i++) {
+      m = marks[i];
+      li = document.createElement("li");
+      li.className = "bm-item";
+
+      a = document.createElement("a");
+      a.className = "bm-link";
+      /* 跳到**书签自己的位置**：用 #p= 而不是章节里的小节锚点，
+         这样同一个标题下的多个书签也能各自落到准确的位置。 */
+      a.setAttribute("href", "/reader/" + book + "/" + m.chap + ".html#p=" + (m.p || 0));
+
+      t = document.createElement("span");
+      t.className = "bm-t";
+      t.textContent = m.label || m.t || m.chap;
+      a.appendChild(t);
+
+      meta = document.createElement("span");
+      meta.className = "bm-meta";
+      var parts = [];
+      if (m.t && m.label) parts.push(m.t);
+      parts.push("读到 " + (m.p || 0) + "%");
+      parts.push(agoOf(m.at));
+      meta.textContent = parts.join(" · ");
+      a.appendChild(meta);
+
+      del = document.createElement("button");
+      del.type = "button";
+      del.className = "bm-del";
+      del.setAttribute("data-mark", m.id);
+      del.setAttribute("aria-label", "删除书签");
+      del.textContent = "×";
+
+      li.appendChild(a);
+      li.appendChild(del);
+      listEl.appendChild(li);
+    }
+
+    if (badgeEl) badgeEl.textContent = marks.length;
+    if (emptyEl) emptyEl.hidden = marks.length > 0;
+    return marks.length;
+  }
+
+  /* 事件委托：书签是 JS 现渲染的，逐个挂监听既啰嗦又容易漏 */
+  function bindMarkList(listEl, book, onChange) {
+    if (!listEl || listEl.__bmBound) return;
+    listEl.__bmBound = true;
+    listEl.addEventListener("click", function (ev) {
+      var btn = ev.target.closest ? ev.target.closest(".bm-del") : null;
+      if (!btn) return;
+      ev.preventDefault();
+      var id = btn.getAttribute("data-mark");
+      if (markRemove(book, id)) {
+        vibrate(6);
+        toast("已删除书签");
+        if (onChange) onChange();
+      }
+    });
+  }
+
   /* ---- 章节页：滚动进度条 + 读完自动标记 + 手动开关 ---- */
   function setupReaderChapter() {
     var root = document.querySelector(".reader");
@@ -767,6 +917,94 @@
     /* 进页面就先落一次"最近在读"，这样即使没读完，书架上的续读入口也是对的 */
     readTouch(book, bookTitle, chapter, chapterTitle);
 
+    /* ---- 小节标题：只用来给位置/书签起一个"认得出来"的名字 ---- */
+    var heads = [];
+    (function () {
+      var all, i, n, ok = { H1: 1, H2: 1, H3: 1, H4: 1 };
+      try { all = document.querySelectorAll(".book-content *"); } catch (e) { return; }
+      for (i = 0; i < all.length; i++) {
+        n = all[i];
+        if (n.id && ok[n.tagName]) heads.push(n);
+      }
+    })();
+
+    function headAt() {
+      /* 视口上方（留 90px 余量）的最后一个标题 = 当前所在小节。
+         标题在文档里天然有序，所以一旦遇到"还没到"的就可以停。 */
+      var best = null, i;
+      for (i = 0; i < heads.length; i++) {
+        if (heads[i].getBoundingClientRect().top <= 90) best = heads[i]; else break;
+      }
+      return best;
+    }
+
+    function curPct() {
+      var doc = document.documentElement;
+      var max = doc.scrollHeight - window.innerHeight;
+      var y = window.pageYOffset || doc.scrollTop || 0;
+      return max > 40 ? Math.min(100, Math.max(0, (y / max) * 100)) : 100;
+    }
+
+    function markLabel() {
+      var h = headAt();
+      return h ? (h.textContent || "").trim().slice(0, 60) : "";
+    }
+
+    /* ===================== 位置的保存 ===================== */
+    /* ⚠️ 只靠 scroll 节流是不够的。手机上离开页面是"按返回键"（pagehide），
+       如果刚滚完还没到节流窗口就卸载了，这次位置就白记了 ——
+       用户看到的就是"一返回就找不到了"。所以两个补丁：
+         1. 滚动时节流保存（700ms）
+         2. pagehide / 切到后台时**立刻**再保存一次 */
+    var saveTimer = null;
+    function savePos() {
+      /* ⚠️ 还没"落定初始位置"之前**一律不写**。
+         否则会踩坑 1 的同款事故：进页面时 curPct() 还是 0，
+         用户没滚动就返回 → 把好不容易存下的位置**覆盖成 0%**。 */
+      if (!restoreSettled) return;
+      readPosSet(book, bookTitle, chapter, chapterTitle, curPct(), markLabel());
+      paintMarkBtn();
+    }
+    function saveSoon() {
+      if (saveTimer) return;
+      saveTimer = setTimeout(function () { saveTimer = null; savePos(); }, 700);
+    }
+    window.addEventListener("pagehide", savePos);
+    document.addEventListener("visibilitychange", function () {
+      if (document.hidden) savePos();
+    });
+
+    /* ===================== 位置的恢复 ===================== */
+    var restoreSettled = false;
+    var userScrolled = false;
+    ["touchstart", "wheel", "keydown", "mousedown"].forEach(function (ev) {
+      window.addEventListener(ev, function () { userScrolled = true; }, { passive: true });
+    });
+
+    function hashPct() {
+      /* 书签跳转用 `#p=37.5`。用 hash 而不是 query：
+         hash 不会参与鉴权/缓存，也不会把 `?t=` 挤掉。 */
+      var m = /[#&?]p=([0-9]+(?:\.[0-9]+)?)/.exec(location.hash || "");
+      return m ? parseFloat(m[1]) : null;
+    }
+
+    function restore() {
+      var fromHash = hashPct();
+      var p = fromHash;
+      if (p === null) {
+        var saved = readPos(readBook(readStore(), book, bookTitle), chapter);
+        if (saved) p = saved.p;
+      }
+      if (p === null || !(p > 0.2)) { restoreSettled = true; return; }
+      if (userScrolled) { restoreSettled = true; return; }
+      var doc = document.documentElement;
+      var max = doc.scrollHeight - window.innerHeight;
+      if (max <= 40) return;            /* 内容还没铺开（图没加载完），等 load 再试 */
+      window.scrollTo(0, Math.round(max * Math.min(100, p) / 100));
+      restoreSettled = true;
+      if (fromHash === null) toast("已回到上次读到的位置 · " + Math.round(p) + "%", 2200);
+    }
+
     function isDone() {
       var st = readStore();
       return !!(st[book] && st[book].chapters && st[book].chapters[chapter]);
@@ -779,7 +1017,35 @@
       btn.setAttribute("aria-pressed", done ? "true" : "false");
       if (btnText) btnText.textContent = done ? "已读完" : "标记为已读";
     }
-    paint();
+
+    /* ===================== 书签 ===================== */
+    var bmBtn = document.getElementById("add-bookmark");
+    var bmBtnText = document.getElementById("add-bookmark-text");
+    var bmPanel = document.getElementById("bm-panel");
+    var bmList = document.getElementById("bm-list");
+    var bmEmpty = document.getElementById("bm-empty");
+    var bmBadge = document.getElementById("bm-count-badge");
+    var bmToggle = document.getElementById("toggle-bookmarks");
+    var bmCountInline = document.getElementById("bm-count-inline");
+
+    function paintMarkBtn() {
+      if (!bmBtn) return;
+      var here = markFind(readStore()[book] || {}, chapter, curPct());
+      bmBtn.classList.toggle("is-on", !!here);
+      bmBtn.setAttribute("aria-pressed", here ? "true" : "false");
+      if (bmBtnText) bmBtnText.textContent = here ? "已加书签" : "加书签";
+    }
+
+    function paintMarks() {
+      var n = renderBookmarks(book, bmList, bmEmpty, bmBadge);
+      if (bmToggle) bmToggle.classList.toggle("is-on", n > 0);
+      /* 按钮上带条数：不点开也能知道"这本书里有几条书签" */
+      if (bmCountInline) {
+        bmCountInline.textContent = String(n);
+        bmCountInline.hidden = n === 0;
+      }
+      paintMarkBtn();
+    }
 
     if (btn) {
       btn.addEventListener("click", function () {
@@ -794,13 +1060,49 @@
       });
     }
 
+    if (bmBtn) {
+      bmBtn.addEventListener("click", function () {
+        var p = curPct();
+        var here = markFind(readStore()[book] || {}, chapter, p);
+        if (here) {
+          markRemove(book, here.id);
+          vibrate(6);
+          toast("已删除书签");
+        } else {
+          var m = markAdd(book, bookTitle, chapter, chapterTitle, p, markLabel());
+          vibrate(12);
+          if (m) {
+            toast("已加书签 · " + Math.round(p) + "%");
+            /* 加完顺手把列表露出来 —— 否则用户不知道书签存到哪儿去了 */
+            if (bmPanel) { bmPanel.hidden = false; bmToggle && bmToggle.setAttribute("aria-expanded", "true"); }
+          } else {
+            toast("这个位置已经有书签了");
+          }
+        }
+        paintMarks();
+      });
+    }
+
+    if (bmToggle && bmPanel) {
+      bmToggle.addEventListener("click", function () {
+        bmPanel.hidden = !bmPanel.hidden;
+        bmToggle.setAttribute("aria-expanded", bmPanel.hidden ? "false" : "true");
+        if (!bmPanel.hidden) {
+          paintMarks();
+          bmPanel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        }
+      });
+    }
+
+    bindMarkList(bmList, book, paintMarks);
+    paint();
+    paintMarks();
+
     var auto = false;
     function onScroll() {
-      var doc = document.documentElement;
-      var max = doc.scrollHeight - window.innerHeight;
-      var y = window.pageYOffset || doc.scrollTop || 0;
-      var pct = max > 40 ? Math.min(100, Math.max(0, (y / max) * 100)) : 100;
+      var pct = curPct();
       if (bar) bar.style.width = pct.toFixed(1) + "%";
+      saveSoon();
       /* 85% 视为读完 —— 结尾常是注释/参考文献，不必真的滑到底 */
       if (!auto && pct >= 85 && !isDone()) {
         auto = true;
@@ -814,7 +1116,12 @@
       ticking = true;
       requestAnimationFrame(function () { ticking = false; onScroll(); });
     }, { passive: true });
-    window.addEventListener("resize", onScroll);
+    window.addEventListener("resize", function () { onScroll(); if (restoreSettled) restore(); });
+
+    /* 先立即试一次；图还没加载完、撑不出高度时，等 load 再补一次
+       （只在用户还没自己滚过的情况下 —— 不能把人从当前位置拽走） */
+    restore();
+    window.addEventListener("load", function () { if (!userScrolled) restore(); });
     onScroll();
   }
 
@@ -851,16 +1158,29 @@
       var bb = state[k];
       if (!bb || !bb.last) continue;
       if (!best || (bb.at || 0) > (best.at || 0)) {
-        best = { slug: k, last: bb.last, lastTitle: bb.lastTitle, title: bb.title, at: bb.at || 0 };
+        best = { slug: k, last: bb.last, lastTitle: bb.lastTitle, title: bb.title,
+                 at: bb.at || 0, pos: readPos(bb, bb.last) };
       }
     }
     if (!best) return;
     var link = document.getElementById("resume-link");
     var elC = document.getElementById("resume-chapter");
     var elB = document.getElementById("resume-book");
+    var elP = document.getElementById("resume-pos");
+    /* 不带 #p= —— 章节页会自己按存下的位置恢复，
+       这条链接永远指向**当下最新**的位置，写死一个百分比反而会过时。 */
     if (link) link.setAttribute("href", "/reader/" + best.slug + "/" + best.last + ".html");
     if (elC) elC.textContent = best.lastTitle || best.last;
     if (elB) elB.textContent = best.title || best.slug;
+    if (elP) {
+      if (best.pos && best.pos.p > 1) {
+        elP.textContent = (best.pos.label ? best.pos.label + " · " : "")
+          + "读到 " + Math.round(best.pos.p) + "%";
+        elP.hidden = false;
+      } else {
+        elP.hidden = true;
+      }
+    }
     resume.hidden = false;
   }
 
@@ -895,6 +1215,31 @@
     var tocHead = document.querySelector(".panel-head .badge.muted");
     if (tocHead && anyRead && items.length) {
       tocHead.textContent = "已读 " + anyRead + " / " + items.length;
+    }
+
+    /* 目录里顺便标出"有书签"的章 —— 否则书签只活在一个折叠面板里，等于藏起来了 */
+    if (book && b) {
+      var byChap = {};
+      readMarks(b).forEach(function (m) { byChap[m.chap] = (byChap[m.chap] || 0) + 1; });
+      for (i = 0; i < items.length; i++) {
+        slug = items[i].getAttribute("data-chapter");
+        if (byChap[slug]) items[i].classList.add("has-mark");
+      }
+    }
+
+    /* 书签面板：**没有书签就整个不显示** —— 一个空面板只会让人以为坏了 */
+    var bmPanel = document.getElementById("bm-panel");
+    if (bmPanel && book) {
+      var bmList = document.getElementById("bm-list");
+      var bmEmpty = document.getElementById("bm-empty");
+      var bmBadge = document.getElementById("bm-count-badge");
+
+      function repaintMarks() {
+        var n = renderBookmarks(book, bmList, bmEmpty, bmBadge);
+        bmPanel.hidden = n === 0;
+      }
+      bindMarkList(bmList, book, repaintMarks);
+      repaintMarks();
     }
   }
 

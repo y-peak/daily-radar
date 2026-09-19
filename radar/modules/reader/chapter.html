@@ -73,11 +73,35 @@
     {% endif %}
   </nav>
 
+  {# 书签面板：默认收起。**没有书签时整个不显示**（由 app.js 决定）——
+     一个空面板只会让人以为坏了。
+     放在正文之后、翻页之前：读到一半想存个书签时，手边就是它。 #}
+  <section class="bm-panel" id="bm-panel" hidden>
+    <div class="panel-head">
+      <h2>书签</h2>
+      <span class="badge muted" id="bm-count-badge">0</span>
+    </div>
+    <ul class="bm-list" id="bm-list"></ul>
+    <p class="hint" id="bm-empty">这本书还没有书签。滑到想记住的地方，点下面的「加书签」。</p>
+  </section>
+
   <div class="read-foot">
-    <button type="button" class="btn ghost" id="mark-read" aria-pressed="false">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg>
-      <span id="mark-read-text">标记为已读</span>
-    </button>
+    <div class="read-acts">
+      <button type="button" class="btn ghost" id="mark-read" aria-pressed="false">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg>
+        <span id="mark-read-text">标记为已读</span>
+      </button>
+      <button type="button" class="btn ghost" id="add-bookmark" aria-pressed="false">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg>
+        <span id="add-bookmark-text">加书签</span>
+      </button>
+      <button type="button" class="btn ghost" id="toggle-bookmarks" aria-expanded="false">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
+        <span>书签</span>
+        {# 有书签才显示条数 —— 否则「这本书里有书签」这件事只有点开才知道 #}
+        <span class="num bm-count" id="bm-count-inline" hidden></span>
+      </button>
+    </div>
     <span class="read-src">
       内容来自
       <a href="{{ book.get('repo', '#') }}" target="_blank" rel="noopener">{{ book.title }}</a>

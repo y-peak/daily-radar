@@ -1789,6 +1789,55 @@ try:
     for _needle in (".book-content", "figure.fig", ".math-block", ".toc-sub[open]",
                     "--scroll-hint", "p.fig-cap"):
         check(f"style.css 含 {_needle}", (lambda n: (lambda: has(n, _css)))(_needle))
+
+    # --- 阅读位置 / 书签 ------------------------------------------------------
+    for _needle in ("readPosSet", "readPos", "markAdd", "markRemove",
+                    "renderBookmarks", "bindMarkList", "agoOf", "restoreSettled"):
+        check(f"app.js 含 {_needle}", (lambda n: (lambda: has(n, _appjs)))(_needle))
+    for _needle in (".bm-list", ".bm-item", ".bm-del", ".resume-pos",
+                    ".read-acts", "has-mark"):
+        check(f"style.css 含 {_needle}", (lambda n: (lambda: has(n, _css)))(_needle))
+
+    # ⭐⭐ 防回归：**位置落定之前不许写盘**。
+    #    进章节页时 curPct() 还是 0；用户没滚就按返回 → pagehide 会把好不容易存下的
+    #    位置**覆盖成 0%**。这跟"拿不到数据不许覆盖好数据"是同一类事故，
+    #    只是发生在浏览器侧 —— 症状同样是"一返回就找不到了"，但原因完全不同。
+    check("保存位置前有落定闸（防空值覆盖好位置）",
+          lambda: has("if (!restoreSettled) return;", _appjs))
+    # ⭐ 只靠 scroll 节流不够：手机上是按返回键离开，可能没到节流窗口就卸载了
+    check("pagehide 时立刻保存位置",
+          lambda: has('addEventListener("pagehide", savePos)', _appjs))
+    # 书签跳转用 hash（不参与鉴权/缓存，也不会把 ?t= 挤掉）
+    check("书签跳转用 #p= hash", lambda: has("[#&?]p=(", _appjs))
+
+    if _pub.is_dir():
+        _ch = _pub / "ai-infra" / "ch02.html"
+        if _ch.is_file():
+            _chtml = _ch.read_text(encoding="utf-8")
+            for _id in ("add-bookmark", "add-bookmark-text", "toggle-bookmarks",
+                        "bm-panel", "bm-list", "bm-empty"):
+                check(f"章节页含 #{_id}",
+                      (lambda i: (lambda: has(f'id="{i}"', _chtml)))(_id))
+        _bkp = _pub / "ai-infra" / "index.html"
+        if _bkp.is_file():
+            check("目录页含书签面板",
+                  lambda: has('id="bm-panel"', _bkp.read_text(encoding="utf-8")))
+        _shelf = _pub / "index.html"
+        if _shelf.is_file():
+            check("书房含精确续读位置位",
+                  lambda: has('id="resume-pos"', _shelf.read_text(encoding="utf-8")))
+
+    # ⭐ 预构建副本必须与源码逐字节一致。
+    #    `/static/<rel>` 优先发 public/ 下的副本 —— 改了 radar/static 却忘了 build，
+    #    线上会**一直发旧副本**，症状是"代码全对但页面没变"。
+    #    直接比字节比"文件里有没有某个函数名"更能抓到这种情况（后者对旧版本也成立）。
+    for _rel in ("app.js", "style.css"):
+        _src = ROOT / "radar" / "static" / _rel
+        _dst = ROOT / "public" / "static" / _rel
+        if _src.is_file() and _dst.is_file():
+            check(f"public/static/{_rel} 与源码逐字节一致",
+                  (lambda a, b: (lambda: eq(a == b, True)))(
+                      _src.read_bytes(), _dst.read_bytes()))
 except Exception as exc:  # noqa: BLE001
     import traceback
     print("  [!!] 读书模块检查抛异常：")

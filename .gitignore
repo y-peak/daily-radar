@@ -52,3 +52,12 @@ apk/
 # ⚠️ 这张二维码里**编码了访问口令**（扫码即下载 + 附带鉴权）→ 等于一把钥匙，别入库
 radar-download-qr.png
 *-download-qr.png
+
+# 服务器侧的运行时残留 —— 它们只存在于部署机上，不该进仓库。
+# 现在服务器是仓库的工作副本（deploy/pull.sh），这些文件会不会让 git status
+# 变脏不重要，重要的是**别有人手滑把它们提交上去**。
+# （.env.bak-* 里很可能还留着旧口令，所以必须挡在这。）
+.env.bak-*
+.tunnel-url
+cf-tunnel.log
+

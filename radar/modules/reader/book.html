@@ -61,6 +61,17 @@
   </ol>
 </section>
 
+{# 书签面板：书签只存在于本机 localStorage，所以这里只有空壳，内容由 app.js 填。
+   **没有书签时整个不显示** —— 一个空面板只会让人以为坏了。 #}
+<section class="panel" id="bm-panel" hidden>
+  <div class="panel-head">
+    <h2>书签</h2>
+    <span class="badge muted" id="bm-count-badge">0</span>
+  </div>
+  <ul class="bm-list" id="bm-list"></ul>
+  <p class="hint" id="bm-empty">还没有书签。读到想记住的地方，在章节页点「加书签」。</p>
+</section>
+
 <section class="panel">
   <h2>出处</h2>
   <ul class="meta-list">
