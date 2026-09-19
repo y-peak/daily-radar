@@ -75,6 +75,11 @@
       "margin": true
     },
 
+    "watchlist": {
+      "enabled": true,
+      "note": "名单存在 data/watchlist.json（不入库），在 /watchlist/ 页面或 App 里改"
+    },
+
     "reader": {
       "enabled": true,
       "note": "书稿是钉死的资产，collect 不联网；更新内容是显式操作（见 radar/modules/reader/books.py 的 commit）"

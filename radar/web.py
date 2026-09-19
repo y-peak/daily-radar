@@ -27,10 +27,11 @@ from flask import (Flask, abort, g, jsonify, request, send_file,
                    send_from_directory)
 from werkzeug.middleware.proxy_fix import ProxyFix
 
+from .core import brief as brief_core
 from .core import registry, store
 from .core.config import Config, load
 from .core.http import HttpClient
-from .core.module import Context
+from .core.module import Context, load_sibling
 from .core.runner import run_all, today
 
 # --------------------------------------------------------------------- 运行态
@@ -340,6 +341,143 @@ def create_app(root: Path | None = None) -> Flask:
         # AppConfig.APK_URL（`/app`），所以改这里不会让已装的 App 出问题。
         meta["url"] = f"/dl/{target.name}"
         return jsonify(meta)
+
+    # -------------------------------------------------------------- 每日简报
+    @app.get("/api/brief")
+    def api_brief():
+        """系统通知到点时手机来取的那段话。
+
+        为什么要做成接口而不是"网页上扒一段"：通知是**原生侧**弹的，
+        它到点的时候网页不一定加载过。原生只要一句 HTTP 就能拿到内容，
+        而且简报的口径、免责声明、降级逻辑都在服务端一处维护。
+
+        `slot` 三个值（早间 / 尾盘 / 收盘）说的东西不一样：
+        尾盘那次必须看**此刻**的数，所以会在请求里现拉一次实时行情 ——
+        这就是它比其他两个慢的原因，别把它当成"接口慢"去优化掉。
+        """
+        slot = (request.args.get("slot") or "close").strip()
+        if slot not in brief_core.SLOTS:
+            return jsonify({"error": f"slot 只能是 {' / '.join(brief_core.SLOTS)}"}), 400
+        http = None
+        if slot == "intraday":
+            http = HttpClient(cfg.section("http"),
+                              log=lambda m: print("   ", m, flush=True))
+        # build_brief 内部把所有失败都吃掉了，这里不会 500 —— 通知链路要它永远有输出
+        return jsonify(brief_core.build_brief(cfg, slot=slot, http=http,
+                                              log=_log_to("   ")))
+
+    # ------------------------------------------------------------ 自选股名单
+    def _watchlist_store():
+        """加载 watchlist 模块的名单读写层。
+
+        单独抽出来是因为 **POST 和 GET 都要用它**，而且它不在 core 里
+        （名单属于 watchlist 这个模块，不是核心概念）。模块目录不是包，
+        只能按文件加载 —— 见 core/module.py::load_sibling。
+        """
+        return load_sibling(str(cfg.modules_dir / "watchlist" / "userlist.py"),
+                            "userlist")
+
+    def _watchlist_modules() -> list:
+        return [m for m in modules if m.name == "watchlist"]
+
+    @app.get("/api/watchlist")
+    def api_watchlist_get():
+        """当前名单 + 今天快照是哪一份。给简报和将来别的端复用。"""
+        users = _watchlist_store()
+        cur = users.load(cfg.data_dir)
+        date = store.latest_date(cfg.data_dir, "watchlist")
+        snap = store.read_json(cfg.data_dir / "watchlist" / f"{date}.json") if date else None
+        return jsonify({
+            "ok": True,
+            "updated_at": cur["updated_at"],
+            "items": cur["items"],
+            "count": len(cur["items"]),
+            "max_items": users.MAX_ITEMS,
+            "snapshot_date": date,
+            "empty": bool((snap or {}).get("empty")),
+        })
+
+    @app.post("/api/watchlist")
+    def api_watchlist_save():
+        """整份替换自选股名单，然后**立刻重跑这一支并重建站点**。
+
+        ⚠️ 三个刻意的选择：
+
+        1. **整份替换**，不是追加。名单页上的文本框里是什么，服务器上就是什么；
+           这样"删掉一行 = 不再看它"是自然语义，也不需要另做删除接口。
+           UI 上必须把这件事说出来，让用户以为"提交是追加"是很危险的误解。
+
+        2. **同步重跑 + 重建**（约两三秒）。否则用户加完股票，页面还是早上的
+           旧名单，他会以为没保存成功 —— 这类"看着没反应"最招人重试。
+           重跑只跑 watchlist 一支，但 **all_modules 传全量**，
+           否则 build_site 会把别的模块页面删光（这个坑踩过）。
+
+        3. 采集正在跑时**不抢**：直接告诉用户"稍后自动更新"，
+           而不是排队等或者两份并发去改同一批文件。
+        """
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return jsonify({"ok": False, "error": "请求体要是 JSON，形如 {\"text\": \"600519\"}"}), 400
+        text = body.get("text")
+        if not isinstance(text, str):
+            return jsonify({"ok": False, "error": "缺 text 字段（字符串）"}), 400
+        if len(text) > 4000:
+            return jsonify({"ok": False, "error": "一次改太多了（最多 4000 字）"}), 400
+
+        try:
+            users = _watchlist_store()
+        except FileNotFoundError:
+            return jsonify({"ok": False, "error": "watchlist 模块不在，先把它装上"}), 500
+
+        http = HttpClient(cfg.section("http"),
+                          log=lambda m: print("   ", m, flush=True))
+        res = users.resolve(http, text)
+        saved = users.save(cfg.data_dir, res["items"])
+        dropped = max(0, len(res["items"]) - len(saved["items"]))
+
+        rebuilt = False
+        refresh = "skipped"
+        wl = _watchlist_modules()
+        with _lock:
+            busy = _state["busy"]
+            if wl and not busy:
+                _state["busy"] = True
+                _state["started_at"] = datetime.now().isoformat(timespec="seconds")
+        if wl and not busy:
+            try:
+                ctx = _build_context(cfg, today())
+                summary = run_all(cfg, cfg.section("app"), wl, ctx,
+                                  log=_log_to("   "), all_modules=modules)
+                rec = (summary.get("modules") or [{}])[0]
+                refresh = rec.get("status") or "ok"
+                rebuilt = refresh == "ok"
+            except Exception as exc:  # noqa: BLE001
+                refresh = f"{type(exc).__name__}: {exc}"
+                print(f"[watchlist] 保存后重跑失败：{refresh}", flush=True)
+            finally:
+                with _lock:
+                    _state["busy"] = False
+                    _state["finished_at"] = datetime.now().isoformat(timespec="seconds")
+
+        # ⚠️ 响应要在**重跑之后**重新读一次名单，不能直接回 `saved`：
+        #    重跑里的 analyze 会拿行情里的权威名字把 `name` 回填进名单，
+        #    而 `saved` 是保存那一刻的样子 —— 那时用户只敲了代码，名字是空的。
+        #    回 `saved` 的后果是：页面上刷出一列**没有名字**的股票，看着像加坏了。
+        final = users.load(cfg.data_dir)
+
+        return jsonify({
+            "ok": True,
+            "saved": len(final["items"]),
+            "items": final["items"],
+            "updated_at": final["updated_at"],
+            "dropped": dropped,
+            "max_items": users.MAX_ITEMS,
+            "unresolved": res["unresolved"],
+            "ambiguous": res["ambiguous"],
+            "search_error": res["error"],
+            "rebuilt": rebuilt,
+            "refresh": refresh,
+        })
 
     @app.post("/api/refresh")
     def api_refresh():

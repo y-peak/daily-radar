@@ -2602,3 +2602,103 @@ body.plans-open { overflow: hidden; }
   .plans-card { transition: none; }
   .plans-card { transform: none; }
 }
+
+/* =========================================================================
+   自选股（/watchlist/）
+   -------------------------------------------------------------------------
+   ⚠️ 这里的表单是**真控件**，浏览器里和 App 里都能用 —— 因为自选股名单本来就存在
+      服务器上，改它不需要经过原生桥。所以这里**不能**出现"仅 App 内可用"那类分支：
+      同一份名单、同一个页面、同一段 JS，三个端看到的就是同一件事。
+   ========================================================================= */
+
+.wl-hero {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--sp-2);
+}
+
+/* 看点列表。左边一条色带承担"语气"，不靠 emoji 也不靠整块染色 ——
+   整块染色会和涨跌色抢注意力，这里红/绿只用来标"好/差"。 */
+.wl-sig-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--sp-2);
+}
+.wl-sig {
+  padding: var(--sp-3);
+  border-left: 3px solid var(--border-strong);
+  background: var(--surface-2);
+  border-radius: 0 var(--r-xs) var(--r-xs) 0;
+  font-size: var(--fs-sm);
+  line-height: 1.65;
+}
+/* 中国习惯：红=好（涨），绿=差（跌），跟整站一致 */
+.wl-sig.good { border-left-color: var(--up); }
+.wl-sig.bad  { border-left-color: var(--down); }
+.wl-sig.warn { border-left-color: var(--warn); }
+
+.wl-name { font-weight: 500; }
+.wl-note {
+  margin-left: var(--sp-2);
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+}
+
+/* ---------------------------------------------------------------- 管理表单 */
+.wl-manage > summary {
+  cursor: pointer;
+  list-style: none;
+  padding: var(--sp-2) 0;
+  font-size: var(--fs-md);
+  font-weight: 500;
+}
+.wl-manage > summary::-webkit-details-marker { display: none; }
+.wl-manage > summary::after {
+  content: "▾";
+  float: right;
+  color: var(--text-faint);
+  transition: transform var(--dur) var(--ease-out);
+}
+.wl-manage[open] > summary::after { transform: rotate(180deg); }
+.wl-manage[open] > summary { margin-bottom: var(--sp-3); }
+
+#wl-text {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 132px;
+  padding: var(--sp-3);
+  font-family: var(--font-mono);
+  font-size: 16px;          /* ⚠️ 低于 16px 手机会自动把整页放大 */
+  line-height: 1.7;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  resize: vertical;
+}
+#wl-text:focus {
+  outline: none;
+  border-color: var(--brand);
+  background: var(--surface);
+  box-shadow: 0 0 0 3px var(--brand-glow);
+}
+
+.wl-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  margin-top: var(--sp-3);
+}
+.wl-msg { font-size: var(--fs-sm); color: var(--text-dim); }
+.wl-msg.ok    { color: var(--down); }
+.wl-msg.warn  { color: var(--warn); }
+.wl-msg.error { color: var(--up); }
+
+@media (max-width: 560px) {
+  /* 手机上 4 列会挤成"每格两个字"，改成 2×2 */
+  .wl-hero { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}

@@ -1343,6 +1343,97 @@
     if (undoBtn) undoBtn.addEventListener("click", doUndo);
   }
 
+  /* ============================================================ 自选股（/watchlist/）
+     这里和规划面板是**两种不同的存储选择**，别把它们的做法搞混：
+
+         规划    只存手机本地 → 必须经原生桥（浏览器里没有那份数据）
+         自选股  存在服务器   → 直接 POST，**不需要桥**
+                 因为每日简报、新闻筛选都在服务器侧生成，它们要知道你盯什么。
+
+     所以这个函数在浏览器里和 App 里做的是同一件事，**没有"仅 App 内可用"分支**。
+
+     保存语义是"**整份替换**"：上面文本框里是什么，服务器上就是什么。
+     这一点必须在文案里说清楚 —— 让用户以为"提交是追加"是很危险的误解。 */
+  function setupWatchlist() {
+    var form = document.getElementById("wl-form");
+    if (!form) return;                    // 不是自选股页，直接退
+    var ta = document.getElementById("wl-text");
+    var btn = document.getElementById("wl-save");
+    var msg = document.getElementById("wl-msg");
+    var busy = false;
+
+    function say(text, cls) {
+      if (!msg) return;
+      msg.textContent = text || "";
+      msg.className = "wl-msg" + (cls ? " " + cls : "");
+    }
+
+    form.addEventListener("submit", function (ev) {
+      ev.preventDefault();
+      if (busy) return;
+      busy = true;
+      if (btn) btn.disabled = true;
+      say("保存中…（服务端会顺手重拉一次行情）");
+
+      fetch("/api/watchlist", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Accept": "application/json" },
+        body: JSON.stringify({ text: (ta && ta.value) || "" }),
+        cache: "no-store"
+      }).then(function (r) {
+        return r.json().then(function (o) { return { status: r.status, body: o }; });
+      }).then(function (res) {
+        var o = res.body || {};
+        busy = false;
+        if (btn) btn.disabled = false;
+
+        if (res.status !== 200 || !o.ok) {
+          say(o.error || ("保存失败（HTTP " + res.status + "）"), "error");
+          return;
+        }
+
+        // ⭐ 「没认出来」和「匹配到多个」必须**分开说**：
+        //    前者是"你写的东西我不认识"，后者是"你给我挑一个"。
+        //    合成一句"部分失败"会让用户不知道该改什么。
+        var parts = ["已保存 " + (o.saved || 0) + " 只"];
+        var trouble = false;
+
+        if (o.unresolved && o.unresolved.length) {
+          trouble = true;
+          parts.push("没认出来：" + o.unresolved.join("、")
+                     + "（用代码、或写全名字再试）");
+        }
+        if (o.ambiguous && o.ambiguous.length) {
+          trouble = true;
+          o.ambiguous.forEach(function (a) {
+            var names = (a.candidates || []).map(function (c) { return c.name; });
+            parts.push("「" + a.token + "」匹配到 " + names.length + " 个："
+                       + names.join(" / ") + "，写具体点或直接用代码");
+          });
+        }
+        if (o.search_error) {
+          trouble = true;
+          parts.push("名字搜索暂时不可用（代码照样能存）");
+        }
+
+        if (o.rebuilt === false) {
+          // 服务端正在跑采集，没重建站点 —— 如实说，别谎称"已生效"
+          parts.push("采集正在进行，页面稍后自动更新");
+          say(parts.join("；"), trouble ? "warn" : "ok");
+          return;
+        }
+        vibrate(10);
+        parts.push("正在刷新页面…");
+        say(parts.join("；"), trouble ? "warn" : "ok");
+        setTimeout(function () { location.reload(); }, 600);
+      }).catch(function (e) {
+        busy = false;
+        if (btn) btn.disabled = false;
+        say("保存失败：" + ((e && e.message) || "网络不通"), "error");
+      });
+    });
+  }
+
   /* ============================================================ 把静音恢复 */
   function restoreMuted() {
     try {
@@ -1981,6 +2072,7 @@
   setupAppVersion();
   setupSettings();
   setupPlans();
+  setupWatchlist();
   setupSwipeBetweenModules();
   setupCountUp();
   setupReaderChapter();

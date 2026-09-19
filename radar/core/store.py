@@ -132,6 +132,15 @@ def _hero_for_module(name: str, data: dict, dates: list[str]) -> dict:
         if chapters:
             return {"value": chapters, "suffix": " 章", "decimals": 0,
                     "delta": totals.get("books"), "tone": "accent"}
+    elif name == "watchlist":
+        # 自选股的首页数字：**我的票平均涨跌** ——
+        # 它比"上证指数"更贴己（首页第一张卡说的就应该是"我关心的东西怎么样"）。
+        # 名单为空时不展示 hero，让模板降级成"去加两只"的引导。
+        s = data.get("summary") or {}
+        avg = s.get("avg_pct")
+        if isinstance(avg, (int, float)) and data.get("count"):
+            return {"value": avg, "suffix": "%", "decimals": 2,
+                    "delta": None, "tone": s.get("tone") or "flat"}
     return {}
 
 

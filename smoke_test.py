@@ -40,14 +40,19 @@ FAILED = []
 
 
 # ------------------------------------------------------------------ 断言助手
+# ⚠️⭐ 这两个失败时抛异常、成功时必须**返回 True**。
+# 返回 None 的后果很隐蔽：`lambda: has(a) and has(b)` 里第一个 has 成功返回 None（假值），
+# `and` 直接短路，**第二个条件根本不会被求值** —— 断言写着两条、实际只测了一条。
 def eq(a, b):
     if a != b:
         raise AssertionError(f"{a!r} != {b!r}")
+    return True
 
 
 def has(needle, haystack):
     if needle not in str(haystack):
         raise AssertionError(f"{needle!r} 不在结果里：{str(haystack)[:200]!r}")
+    return True
 
 
 def check(name, fn):
@@ -326,7 +331,7 @@ found = registry.discover(cfg.modules_dir)
 # ⚠️ 别再写死模块数量。加一个模块就红一片的测试是**噪音**，只会训练人忽略失败。
 # 这里改为断言"内置模块都在"，并把底栏数量从注册表推出来 —— 加模块时该改的是
 # 这一行的清单（失败信息会明确说少了谁），而不是三个散落的魔数。
-BUILTIN_MODULES = ["github_trending", "market_flow", "reader"]
+BUILTIN_MODULES = ["github_trending", "market_flow", "reader", "watchlist"]
 check("发现全部内置模块", lambda: eq(sorted(found), sorted(BUILTIN_MODULES)))
 check("name 与目录一致", lambda: eq(all(k == v.name for k, v in found.items()), True))
 check("order 排序", lambda: eq(
@@ -2115,9 +2120,16 @@ try:
           lambda: eq(_js2.count("save();"), 4))
 
     # ⭐ 用户输入绝不当 HTML 渲染
-    check("⭐ 标题走 textContent 而不是 innerHTML",
-          lambda: has("t.textContent = it.t", _js2)
-          and eq("innerHTML" in _js2, False))
+    # ⚠️ 这条原来写的是"整份 app.js 里不许出现 innerHTML" —— 那个判据**永远不可能成立**
+    #    （页脚时间、下拉菜单本来就用 innerHTML 拼静态图标），它以前一直"过"
+    #    只是因为 has() 返回 None 让 and 短路了，下面那半句压根没执行。
+    #    正确的判据是**按含义**限定：凡 innerHTML 赋值，右侧不许插用户数据。
+    _bad_html = re.findall(r"innerHTML\s*=\s*[^;]{0,400}", _js2)
+    check("⭐ 规划标题走 textContent，不当 HTML 渲染",
+          lambda: has("t.textContent = it.t", _js2))
+    check("⭐ 没有任何 innerHTML 赋值里掺了用户输入（it./p.title）",
+          lambda: eq(any(("it." in x) or ("p.title" in x) for x in _bad_html), False)
+          and eq(len(_bad_html) > 0, True))
 
     # ⭐ WebView 里 window.confirm 默认不弹（直接返回 false），拿它做确认
     #    会变成"点了删除没反应"。改成"立刻删 + 撤销"。
@@ -2153,8 +2165,12 @@ try:
           < _java.index('addJavascriptInterface(new NativeBridge()'))
 
     # --- 样式 ---
+    # ⚠️ 切片必须**到下一个节头为止**。以前第 33 节是文件末尾，`[_c0:]` 恰好等于
+    #    "这一节"；后来又在末尾追加了第 34 节，切片就把新节也算进来了，
+    #    于是"第 33 节不许出现 --up"这条断言被**别的节**弄红了 —— 断言要盯自己那一节。
     _c0 = _css.index("33. 个人规划弹窗")
-    _css33 = _css[_c0:]
+    _m33 = re.search(r"\n/\* =+\n", _css[_c0:])
+    _css33 = _css[_c0:_c0 + _m33.start()] if _m33 else _css[_c0:]
     check("样式含第 33 节", lambda: has(".plans-card", _css33))
     check("⭐ 滚动区有 min-height:0（不然列表长了不出现滚动条）",
           lambda: has("min-height: 0", _css33))
@@ -2449,6 +2465,333 @@ except Exception as exc:  # noqa: BLE001
     print("  [!!] 到期提醒检查抛异常：")
     print(traceback.format_exc())
     FAILED.append("reminder")
+
+# ==================================================== 18. 自选股 + 大盘简报
+# 这一段守的是几件"看起来对、其实在静默丢数据"的事：
+#   * 表单往返幂等（回填的文本再存一遍，一只都不许少）
+#   * 候选有多个时不许替用户挑，但也**不许**把"代码完全相等"当歧义
+#   * 简报里每个数字都得能说出自己是哪天的（尾盘会实时指数与旧家数并置）
+print("\n== 18. 自选股 + 大盘简报 ==")
+try:
+    import json as _json18
+    import os as _os18
+    import tempfile as _tf18
+
+    from radar.core import brief as _brief
+    from radar.core.module import load_sibling as _ls18
+
+    _wl_dir = cfg.modules_dir / "watchlist"
+    _usr = _ls18(str(_wl_dir / "userlist.py"), "userlist")
+    _src = _ls18(str(_wl_dir / "sources.py"), "sources")
+
+    def _raises(fn, exc=Exception):
+        try:
+            fn()
+        except exc:
+            return True
+        raise AssertionError("本该抛异常，却没有抛")
+
+    # ---------------------------------------------------------- 名单落盘
+    _d18 = Path(_tf18.mkdtemp(prefix="radar18_"))
+    check("名单文件不存在 → 空名单，不抛",
+          lambda: eq(_usr.load(_d18), {"updated_at": None, "items": []}))
+    (_d18 / "watchlist.json").write_text("{ 这不是 json", encoding="utf-8")
+    check("名单文件坏了 → 空名单，不抛",
+          lambda: eq(_usr.load(_d18)["items"], []))
+
+    # ⭐ secid 会被拼进请求 URL —— 白名单必须挡在**写盘**这一层
+    (_d18 / "watchlist.json").write_text(_json18.dumps({
+        "items": [{"secid": '1.600519"&x=', "code": "600519", "name": "t"},
+                  {"secid": "1.600519", "code": "600519", "name": "真货"}]},
+        ensure_ascii=False), encoding="utf-8")
+    check("⭐ 非法 secid 被拦（它是要拼进 URL 的）",
+          lambda: eq([i["name"] for i in _usr.load(_d18)["items"]], ["真货"]))
+
+    _s18 = _usr.save(_d18, [
+        {"secid": "1.600519", "code": "600519", "name": "贵州茅台"},
+        {"secid": "1.600519", "code": "600519", "name": "写重了"},
+        {"secid": "bad secid", "code": "x"},
+        {"secid": "116.00700", "code": "00700"},
+    ])
+    check("save 去重 + 丢掉非法项", lambda: eq(len(_s18["items"]), 2))
+    check("save 之后不留 .tmp（原子写）",
+          lambda: eq((_d18 / "watchlist.json.tmp").exists(), False)
+          and eq((_d18 / "watchlist.json").is_file(), True))
+    check("save 给空名字条目标上 added_at",
+          lambda: eq(bool(_s18["items"][1]["added_at"]), True))
+
+    # ---------------------------------------------------------- 输入的解析
+    # ⚠️ 用**桩**替掉 search：解析逻辑不该依赖网络，否则这段测试会被网络弄红。
+    class _Src18:
+        """真 guess_secid / looks_like_code + 假 search。"""
+        guess_secid = staticmethod(_src.guess_secid)
+        looks_like_code = staticmethod(_src.looks_like_code)
+
+        def __init__(self, hits):
+            self.hits = hits
+
+        def search(self, http, kw, count=8):
+            return self.hits.get(kw, [])
+
+    class _Boom18(_Src18):
+        def search(self, http, kw, count=8):
+            raise RuntimeError("搜索接口挂了")
+
+    _real_src = _usr.sources
+    try:
+        # 东财搜 `00700` 会同时给出 00700(腾讯控股)/000700(模塑科技)/300700/600700
+        _hk_hits = [
+            {"secid": "116.00700", "code": "00700", "name": "腾讯控股", "type": "hk"},
+            {"secid": "0.000700", "code": "000700", "name": "模塑科技", "type": "a"},
+            {"secid": "0.300700", "code": "300700", "name": "岱勒新材", "type": "a"},
+        ]
+        _usr.sources = _Src18({"00700": _hk_hits})
+        _rt = _usr.resolve(None, "600519\n00700\n002594\n300750\n601318")
+        check("⭐ 表单往返幂等：回填的港股代码不许被当歧义丢掉",
+              lambda: eq([i["secid"] for i in _rt["items"]],
+                         ["1.600519", "116.00700", "0.002594", "0.300750", "1.601318"]))
+        check("⭐ 幂等路径上没人被静默丢掉",
+              lambda: eq(_rt["unresolved"], []) and eq(_rt["ambiguous"], []))
+
+        _usr.sources = _Src18({"贵州茅台": [
+            {"secid": "1.600519", "code": "600519", "name": "贵州茅台", "type": "a"},
+            {"secid": "0.000995", "code": "000995", "name": "皇台酒业", "type": "a"},
+        ]})
+        _ex = _usr.resolve(None, "贵州茅台")
+        check("名字完全相等 → 直接选定，不用问用户",
+              lambda: eq([i["secid"] for i in _ex["items"]], ["1.600519"]))
+
+        _usr.sources = _Src18({"茅台": [
+            {"secid": "1.600519", "code": "600519", "name": "贵州茅台", "type": "a"},
+            {"secid": "0.000995", "code": "000995", "name": "皇台酒业", "type": "a"},
+        ]})
+        _am = _usr.resolve(None, "茅台")
+        check("⭐ 多候选且都不是完全相等 → 进 ambiguous，不替用户挑",
+              lambda: eq([i["secid"] for i in _am["items"]], [])
+              and eq(_am["ambiguous"][0]["token"], "茅台"))
+        check("ambiguous 要带上候选（否则用户没法选）",
+              lambda: eq(len(_am["ambiguous"][0]["candidates"]), 2))
+
+        _usr.sources = _Src18({})
+        _ur = _usr.resolve(None, "sh600519\n这不存在的玩意")
+        check("认不出的进 unresolved，不硬塞",
+              lambda: eq(len(_ur["items"]), 1) and eq(_ur["unresolved"], ["这不存在的玩意"]))
+
+        _usr.sources = _Boom18({})
+        _er = _usr.resolve(None, "sh600519\n茅台")
+        check("⭐ 搜索挂了：纯代码照常работает，且如实报错（不装作没事）",
+              lambda: eq(len(_er["items"]), 1) and eq(bool(_er["error"]), True)
+              and eq(_er["unresolved"], ["茅台"]))
+    finally:
+        _usr.sources = _real_src
+
+    # ---------------------------------------------------------- 模块行为
+    _wm = registry.discover(cfg.modules_dir)["watchlist"]
+
+    class _Ctx18:
+        dry_run = False
+        config = cfg
+
+        def __init__(self, data_dir, http=None):
+            self.data_dir = data_dir
+            self.http = http
+
+        def log_info(self, *a, **k):
+            pass
+
+    _d18e = Path(_tf18.mkdtemp(prefix="radar18e_"))
+    _emp = _wm.collect(_Ctx18(_d18e))
+    check("⭐ 空名单是合法状态（不抛错，页面/表单才出得来）",
+          lambda: eq(_emp.get("empty"), True))
+    check("⭐ 行情一条都没拉到 → 抛错，今天不写快照（不拿空数据顶掉好数据）",
+          lambda: _raises(lambda: _wm.collect(_Ctx18(_d18, http=object()))))
+
+    _rows18 = [
+        {"f12": "600519", "f13": 1, "f14": "贵州茅台", "f2": 1700.0, "f3": 1.5, "f6": 3e9},
+        {"f12": "000001", "f13": 0, "f14": "停牌股", "f2": 10.0, "f3": None, "f6": None},
+        {"f12": "002594", "f13": 0, "f14": "比亚迪", "f2": 200.0, "f3": -2.5, "f6": 1e9},
+    ]
+    _an18 = _wm.analyze({"quotes": _rows18, "list": [], "requested": [],
+                         "list_updated_at": None}, _Ctx18(_d18e))
+    check("⭐ 停牌（没有涨跌）的不许被当成最弱那只",
+          lambda: eq(_an18["summary"]["worst"], "比亚迪"))
+    check("停牌股被排到明细最后", lambda: eq(_an18["items"][-1]["name"], "停牌股"))
+    check("涨跌平/均值口径", lambda: eq((_an18["summary"]["up"], _an18["summary"]["down"],
+                                       _an18["summary"]["flat"]), (1, 1, 1))
+          and eq(_an18["summary"]["avg_pct"], -0.5))
+    check("结论是规则算出来的，不是空的", lambda: eq(len(_an18["signals"]) > 0, True))
+    check("report 能出（不抛）", lambda: eq(bool(_wm.report(_an18, _Ctx18(_d18e))), True))
+    check("report 空名单也不抛",
+          lambda: eq(bool(_wm.report({"empty": True, "items": [], "summary": {}},
+                                    _Ctx18(_d18e))), True))
+
+    # ---------------------------------------------------------- 简报
+    _bfsrc = (ROOT / "radar" / "core" / "brief.py").read_text(encoding="utf-8")
+    check("简报三个时段", lambda: eq(list(_brief.SLOTS), ["morning", "intraday", "close"]))
+
+    _mk18 = {"up": 605, "down": 4567, "total": 5558, "up_ratio": 10.9,
+             "index_name": "上证指数", "index_price": "3,888.11", "index_pct": "-1.18%",
+             "as_of_label": "09-11",
+             "flow_in": [{"text": "通信设备+47.41 亿"}],
+             "flow_out": [{"text": "电子-99.93 亿"}]}
+    _foc18 = _brief._rule_focus("close", _mk18, {"count": 0})
+    check("⭐ 资金流按自己的口径命名（净流入/净流出），不冒充涨跌榜",
+          lambda: any("主力净流入" in x for x in _foc18)
+          and eq(any("领涨" in x for x in _foc18), False))
+    check("⭐ 快照不是今天的 → 看点里必须带出日期",
+          lambda: eq(all(x.startswith("09-11") for x in _foc18), True))
+    check("快照就是今天的 → 不画蛇添足加日期",
+          lambda: eq(any("09-11" in x for x in _brief._rule_focus(
+              "close", {**_mk18, "as_of_label": ""}, {"count": 0})), False))
+
+    _live_line = _brief._compose_line(
+        "intraday", _mk18, {"count": 5, "up": 1, "down": 4,
+                            "avg_pct": -0.79, "avg_pct_text": "-0.79%"})
+    check("⭐ 尾盘那句话：实时指数与快照家数各自带时间基准（不许并置成一句矛盾话）",
+          lambda: has("14:30", _live_line) and has("09-11", _live_line))
+    check("尾盘不调大模型（数字每小时在变，缓存必然对不上）",
+          lambda: has('if slot == "intraday" else _llm_view', _bfsrc))
+    check("空快照也拼得出句子（通知链路要它永远有输出）",
+          lambda: has("—", _brief._compose_line(
+              "close", _brief._market_numbers({}, None, "2026-09-20"), {})))
+    check("空快照的看点是空表，不抛",
+          lambda: eq(_brief._rule_focus("close", {}, {}), []))
+
+    _wn18 = _brief._watch_numbers({}, [
+        {"f12": "600519", "f14": "贵州茅台", "f3": 1.0},
+        {"f12": "00700", "f14": "腾讯控股", "f3": -2.0},
+        {"f12": "x", "f14": "停牌", "f3": None}])
+    check("实时自选块：涨/跌/平数对得上",
+          lambda: eq((_wn18["up"], _wn18["down"], _wn18["flat"]), (1, 1, 1)))
+    check("实时自选块：均值只用有涨跌的算（停牌不拉低）",
+          lambda: eq(_wn18["avg_pct"], -0.5))
+
+    # ⭐ 缓存键必须是"这份简报属于哪天"。若拿快照日期当键，采集连挂几天之后
+    #    早间简报会命中几天前那条缓存 —— 里面的"隔夜外盘"跟你今天毫无关系。
+    class _FakeLLM18:
+        def __init__(self, *a, **k):
+            self.available = True
+            self.provider = "fake"
+            self.model = "fake"
+
+        def why_unavailable(self):
+            return ""
+
+        def chat_json(self, *a, **k):
+            return {"summary": "假的", "focus": ["看看"], "expect": "留意"}
+
+    _real_llm = _brief.LLM
+    _d18c = Path(_tf18.mkdtemp(prefix="radar18c_"))
+    try:
+        _brief.LLM = _FakeLLM18
+        _brief._llm_view(cfg, _d18c, "2026-09-20", "2026-09-18", "morning",
+                         {"x": 1}, lambda *a: None)
+    finally:
+        _brief.LLM = _real_llm
+    check("⭐ 简报缓存按「简报属于哪天」分片，不是按快照哪天",
+          lambda: has("2026-09-20-morning.json",
+                      [p.name for p in (_d18c / "brief").iterdir()]))
+
+    # ⚠️ 下面这段会走真正的 build_brief，**必须先把 key 摘掉再跑** ——
+    #    服务器上如果环境里带着 key，这段就会真的调三次大模型（花钱 + 变慢）。
+    #    测试要验的是"大模型不可用时还能不能出东西"，那就要制造"不可用"。
+    _key_env18 = (cfg.section("llm").get("api_key_env") or "RADAR_LLM_KEY")
+    _old_key18 = _os18.environ.pop(_key_env18, None)
+    _built18 = {}
+    try:
+        for _s18 in _brief.SLOTS:
+            _built18[_s18] = _brief.build_brief(cfg, slot=_s18, http=None,
+                                                log=lambda *a: None)
+    finally:
+        if _old_key18 is not None:
+            _os18.environ[_key_env18] = _old_key18
+    check("⭐ 大模型不可用时简报只剩数字 —— 不许因此整条消失",
+          lambda: eq(all(_brief.DISCLAIMER in b["big"] and b["line"] in b["big"]
+                         and b["llm"]["used"] is False
+                         for b in _built18.values()), True))
+    check("三个时段都有看点（大模型不给就落到规则）",
+          lambda: eq(all(len(b["focus"]) > 0 for b in _built18.values()), True))
+
+    # ---------------------------------------------------------- 网页/接口
+    _websrc = (ROOT / "radar" / "web.py").read_text(encoding="utf-8")
+    check("web.py 有 /api/brief", lambda: has('@app.get("/api/brief")', _websrc))
+    check("web.py 有 GET /api/watchlist", lambda: has('@app.get("/api/watchlist")', _websrc))
+    check("web.py 有 POST /api/watchlist", lambda: has('@app.post("/api/watchlist")', _websrc))
+    check("⭐ 保存后同步重跑 + 重建（否则用户以为没保存上）",
+          lambda: has("all_modules=modules", _websrc) and has('"rebuilt"', _websrc))
+    check("⭐ 采集正在进行时不抢（如实说「稍后自动更新」）",
+          lambda: has('busy = _state["busy"]', _websrc))
+    check("⭐ 保存响应在重跑之后重新读名单（否则回给页面一列没名字的股票）",
+          lambda: has("final = users.load(cfg.data_dir)", _websrc))
+    check("页面上的表单是**真控件**（不在原生桥分支里）", lambda: has(
+        "wl-form", (_wl_dir / "template.html").read_text(encoding="utf-8")))
+    check("⭐ 表单文案说清了「整份替换」（不然「删一行」是个危险的误解）",
+          lambda: has("整份替换",
+                      (_wl_dir / "template.html").read_text(encoding="utf-8")))
+    check("⭐ app.js 把「认不出」和「有多个候选」分开说",
+          lambda: eq(("unresolved" in (ROOT / "radar/static/app.js"
+                                      ).read_text(encoding="utf-8"))
+                     and ("ambiguous" in (ROOT / "radar/static/app.js"
+                                          ).read_text(encoding="utf-8")), True))
+
+    try:
+        from radar.web import create_app as _mkapp18
+        _old_token = _os18.environ.get("RADAR_TOKEN")
+        _os18.environ["RADAR_TOKEN"] = "smoke-token-18"
+        try:
+            _tv = _mkapp18(ROOT)
+            _fresh = _tv.test_client()          # 干净客户端：没有 Cookie
+            check("⭐ 没口令 → /api/brief 401", lambda: eq(
+                _fresh.get("/api/brief?slot=close").status_code, 401))
+            check("⭐ 没口令 → /api/watchlist 401", lambda: eq(
+                _fresh.get("/api/watchlist").status_code, 401))
+            check("错口令 → 401", lambda: eq(_fresh.get("/?t=nope").status_code, 401))
+            _ok = _tv.test_client()
+            check("带口令（请求头）→ 200", lambda: eq(
+                _ok.get("/api/brief?slot=close",
+                        headers={"X-Radar-Token": "smoke-token-18"}).status_code, 200))
+            check("非法 slot → 400", lambda: eq(
+                _ok.get("/api/brief?slot=noon",
+                        headers={"X-Radar-Token": "smoke-token-18"}).status_code, 400))
+            _wlj = _ok.get("/api/watchlist",
+                           headers={"X-Radar-Token": "smoke-token-18"}).get_json()
+            check("GET /api/watchlist 回得出名单",
+                  lambda: eq(_wlj.get("ok"), True) and eq(isinstance(_wlj.get("items"), list), True))
+            # ⚠️ 这里**故意不发 POST**：POST 会真的重跑采集并重建站点，
+            #    冒烟测试不该有副作用。（往返幂等已在上面用桩验过。）
+        finally:
+            if _old_token is None:
+                _os18.environ.pop("RADAR_TOKEN", None)
+            else:
+                _os18.environ["RADAR_TOKEN"] = _old_token
+    except ImportError:
+        print("  [skip] 没装 flask，跳过接口断言")
+
+    # ---------------------------------------------------------- 产物
+    check("产物里有自选股页", lambda: eq((ROOT / "public/watchlist/index.html").is_file(), True))
+    check("产物自选股页带管理表单", lambda: has(
+        'id="wl-text"', (ROOT / "public/watchlist/index.html").read_text(encoding="utf-8")))
+    check("产物首页指向 /watchlist/", lambda: has(
+        'href="/watchlist/"', (ROOT / "public/index.html").read_text(encoding="utf-8")))
+    check("产物样式含自选股节",
+          lambda: has(".wl-hero",
+                      (ROOT / "public/static/style.css").read_text(encoding="utf-8")))
+
+    # ---------------------------------------------------------- 文档
+    _readme18 = (ROOT / "README.md").read_text(encoding="utf-8")
+    check("README 记录了自选股", lambda: has("我的自选股", _readme18))
+    check("README 写清了名单存服务器（不是存手机）",
+          lambda: has("名单为什么存服务器", _readme18))
+    check("README 记录了每日简报接口", lambda: has("/api/brief", _readme18))
+    check("⭐ README 写清了「主力净流入」不是「领涨板块」",
+          lambda: has("不是「领涨板块」", _readme18))
+    check("⭐ README 写清了「一句话里不许出现两个时间基准」",
+          lambda: has("一句话里不许出现两个时间基准", _readme18))
+except Exception as exc:  # noqa: BLE001
+    import traceback
+    print("  [!!] 自选股/简报检查抛异常：")
+    print(traceback.format_exc())
+    FAILED.append("watchlist")
 
 print("\n" + "=" * 52)
 if FAILED:

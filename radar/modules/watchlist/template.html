@@ -1,0 +1,167 @@
+{% if not dates %}
+<div class="empty">
+  <p><strong>{{ module.title }}</strong> 还没有数据。</p>
+  <p class="hint">执行 <code>python3 -m radar run watchlist</code> 生成。</p>
+</div>
+{% else %}
+{# 一律用 .get 取值：历史页面是半年后也要能打开的静态快照。 #}
+{% set summary = data.get('summary', {}) %}
+{% set signals = data.get('signals', []) %}
+{% set items = data.get('items', []) %}
+{% set missing = data.get('missing', []) %}
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>我的自选股</h2>
+    {% if data.get('count') %}
+    <span class="badge muted">{{ data.get('count') }} 只</span>
+    {% endif %}
+  </div>
+
+  {% if data.get('empty') %}
+  <div class="empty">
+    <p>名单还是空的 —— 下面「管理自选股」里填代码或名字，保存后就有了。</p>
+    <p class="hint">支持 A股 / 港股 / 美股，例如 <code>600519</code>、<code>茅台</code>、<code>hk00700</code></p>
+  </div>
+  {% else %}
+
+  <div class="wl-hero">
+    <div class="stat-cell {{ summary.get('tone', 'flat') }}">
+      <div class="label">平均涨跌</div>
+      <span class="num {{ summary.get('tone', 'flat') }}">{{ summary.get('avg_pct_text', '—') }}</span>
+      <span class="pct {{ summary.get('tone', 'flat') }}">共 {{ data.get('count', 0) }} 只</span>
+    </div>
+    <div class="stat-cell up">
+      <div class="label">上涨</div>
+      <span class="num">{{ summary.get('up', 0) }}</span>
+      <span class="pct up">只</span>
+    </div>
+    <div class="stat-cell down">
+      <div class="label">下跌</div>
+      <span class="num">{{ summary.get('down', 0) }}</span>
+      <span class="pct down">只</span>
+    </div>
+    <div class="stat-cell flat">
+      <div class="label">平 / 停牌</div>
+      <span class="num">{{ summary.get('flat', 0) }}</span>
+      <span class="pct flat">只</span>
+    </div>
+  </div>
+
+  {# 一条堆叠条：一眼看出"今天我的票整体怎么样" #}
+  {% if data.get('count') %}
+  <div class="breadth" style="margin-top:18px">
+    <div class="breadth-bar" role="img"
+         aria-label="上涨 {{ summary.get('up', 0) }} 只，平盘 {{ summary.get('flat', 0) }} 只，下跌 {{ summary.get('down', 0) }} 只">
+      <i class="seg up"   style="width:{{ (summary.get('up', 0) / data.get('count') * 100) | round(2) }}%"></i>
+      <i class="seg flat" style="width:{{ (summary.get('flat', 0) / data.get('count') * 100) | round(2) }}%"></i>
+      <i class="seg down" style="width:{{ (summary.get('down', 0) / data.get('count') * 100) | round(2) }}%"></i>
+    </div>
+  </div>
+  {% endif %}
+  {% endif %}
+</section>
+
+{% if signals %}
+<section class="panel">
+  <div class="panel-head"><h2>看点</h2></div>
+  <ul class="wl-sig-list">
+    {% for s in signals %}
+    <li class="wl-sig {{ s.get('level', 'flat') }}">{{ s.get('text', '') }}</li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+
+{% if items %}
+<section class="panel">
+  <div class="panel-head">
+    <h2>明细</h2>
+    <span class="badge muted">按涨跌幅排</span>
+  </div>
+  <div class="table-wrap">
+    <table class="tbl">
+      <thead>
+        <tr>
+          <th>名称</th><th>最新</th><th>涨跌幅</th>
+          <th>成交额</th>
+          <th class="col-opt">代码</th>
+          <th class="col-opt">换手</th>
+          <th class="col-opt">市盈率</th>
+          <th class="col-opt">市净率</th>
+          <th class="col-opt">总市值</th>
+          <th class="col-opt">振幅</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for it in items %}
+        <tr>
+          <td>
+            <span class="wl-name">{{ it.get('name', '') }}</span>
+            {% if it.get('big_amount') %}<span class="tag">放量</span>{% endif %}
+            {% if it.get('note') %}<span class="wl-note">{{ it.get('note') }}</span>{% endif %}
+          </td>
+          <td class="num">{{ it.get('price_text', '—') }}</td>
+          <td class="num {{ it.get('tone', 'flat') }}">{{ it.get('pct_text', '—') }}</td>
+          <td class="num">{{ it.get('amount_text', '—') }}</td>
+          <td class="num col-opt">{{ it.get('market', '') }}{{ it.get('code', '') }}</td>
+          <td class="num col-opt">{{ it.get('turnover_text', '—') }}%</td>
+          <td class="num col-opt">{{ it.get('pe_text', '—') }}</td>
+          <td class="num col-opt">{{ it.get('pb_text', '—') }}</td>
+          <td class="num col-opt">{{ it.get('mktcap_text', '—') }}</td>
+          <td class="num col-opt">{{ it.get('amplitude_text', '—') }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% if missing %}
+  <p class="hint">⚠️ {{ missing | length }} 只没拿到行情（可能代码写错或已退市）：<code>{{ missing | join('、') }}</code></p>
+  {% endif %}
+</section>
+{% endif %}
+
+{# ============================================================ 管理区
+   ⚠️ 这是**唯一**能改名单的地方，浏览器里和 App 里都是同一个页面、同一段 JS，
+      所以不存在"两套 UI 要对齐"的问题。
+      提交后服务端会重跑 watchlist 这一支并重建站点，页面刷新即见。 #}
+<section class="panel">
+  <details class="wl-manage" id="wl-manage" {% if data.get('empty') %}open{% endif %}>
+    <summary>管理自选股</summary>
+    <form id="wl-form" autocomplete="off">
+      <p class="hint">
+        <strong>每行一只</strong>，也可以逗号 / 空格隔开。支持代码
+        （<code>600519</code>、<code>hk00700</code>、<code>AAPL</code>）、
+        带前缀（<code>sh600519</code>、<code>sz000001</code>），
+        或者直接写<strong>名字</strong>（<code>茅台</code>、<code>腾讯控股</code>）。
+      </p>
+      <textarea id="wl-text" name="text" rows="6" spellcheck="false"
+                autocapitalize="off" autocorrect="off"
+                placeholder="600519&#10;000001&#10;hk00700&#10;贵州茅台">{{ data.get('list_text', '') }}</textarea>
+      <div class="wl-actions">
+        <button class="btn primary" type="submit" id="wl-save">保存名单</button>
+        <span class="wl-msg" id="wl-msg" role="status" aria-live="polite"></span>
+      </div>
+      <p class="hint" id="wl-current">
+        当前：{% if data.get('list_display') %}{{ data.get('list_display') }}{% if data.get('count', 0) > 12 %} …共 {{ data.get('count') }} 只{% endif %}{% else %}（空）{% endif %}
+      </p>
+      <p class="hint">
+        ⚠️ 保存会**整份替换**上面的名单 —— 删掉哪行就等于不再看它。
+        名单存在服务器上，手机上、电脑上打开这个页面改的都是同一份。
+      </p>
+    </form>
+  </details>
+</section>
+
+<section class="panel">
+  <div class="panel-head"><h2>说明</h2></div>
+  <div class="prose">
+    <ul>
+      <li>行情来自东方财富 <code>push2delay</code> 域，<strong>约 15 分钟延迟</strong>，用于每日复盘，不适合盘中交易。</li>
+      <li>名单存在服务器（<code>data/watchlist.json</code>，不入仓库），不在手机本地 ——
+          因为每日简报、以后的新闻筛选都在服务器上生成，它们要知道你盯什么。</li>
+      <li>每天 08:15 采集一次；保存名单会立刻重跑一次这一支，不用等到明天。</li>
+    </ul>
+  </div>
+</section>
+{% endif %}
