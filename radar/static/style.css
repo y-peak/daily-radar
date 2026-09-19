@@ -2439,6 +2439,33 @@ pre.json {
   text-align: center;
 }
 
+/* 提醒状态：到期当天早上 9:00 的系统通知。
+   刻意**做得很轻** —— 它是个说明，不是「注意」，常驻在表单下面
+   如果长得像警告，用户会一直以为哪里出错了。
+   用 flex 而不是让文字和按钮挤在一行的原因：手机上文案会长到折行，
+   按钮跟着掉到下一行更自然；用 inline 的话它会跟着最后一行乱跑。
+   左右对齐：文字左、按钮右 —— 按钮不会因为文案长短而跳来跳去。 */
+.plan-remind {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  margin: 0 0 var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-xs);
+  background: var(--surface-2);
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  line-height: 1.55;
+}
+/* ⚠️ min-width:0 + flex:1 两个都要：flex 子项默认 min-width:auto，
+   长文案（尤其中文没有空格）不会折行，而是把整个卡片撑宽。 */
+.plan-remind > span {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.plan-remind > button { flex: none; white-space: nowrap; }
+
 /* ---- 列表 ---- */
 .plan-list {
   list-style: none;

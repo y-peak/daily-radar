@@ -219,6 +219,15 @@
         <button id="plan-hide-done" class="plan-linkish" type="button" hidden>隐藏已完成</button>
       </div>
 
+      {# 提醒状态：到期当天早上 9:00 会弹一条系统通知。
+         这里只说"现在是什么情况、需要的话怎么办"，
+         判断全部来自原生 —— 网页不可能知道系统有没有给通知权限。
+         用 div 而不是 p：里面可能带按钮，块级套在 p 里会被浏览器静默截断。 #}
+      <div id="plan-remind" class="plan-remind" hidden>
+        <span id="plan-remind-txt"></span>
+        <button id="plan-remind-btn" class="plan-linkish" type="button" hidden></button>
+      </div>
+
       <p id="plan-empty" class="plan-empty" hidden>
         还没有规划。上面写一条，点「添加」。
       </p>

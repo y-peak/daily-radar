@@ -756,6 +756,121 @@
         try { native.downloadUpdate(); } catch (e) { say("下载没能启动", "is-warn"); }
       });
     }
+
+    /* ---------------- 规划提醒 ----------------
+       这一块显示的每一条事实都来自原生（native.reminderInfo()），网页不自己算：
+
+         · "下一次什么时候响"只可能有一份真相 —— 排程在原生那边（它要在
+           App 没打开、甚至没联网时也自洽），网页算一遍必然对不上，而对不上
+           的表现是"设置页说 9 点、实际没响"，最难查。
+         · "有没有通知权限 / 准点权限"更是只有系统知道。
+
+       所以这里只做两件事：把事实翻译成人话，把用户送到该去的地方。 */
+    var remNext = document.getElementById("rem-next");
+    var remNotifyEl = document.getElementById("rem-notify");
+    var remExactEl = document.getElementById("rem-exact");
+    var remMsg = document.getElementById("rem-msg");
+    var remTest = document.getElementById("rem-test");
+    var remPerm = document.getElementById("rem-perm");
+    var remExactBtn = document.getElementById("rem-exact-btn");
+    var remBoot = document.getElementById("rem-boot");
+
+    /* 这台机器要不要额外开自启动（小米/华为这类默认禁后台自启）。
+       不需要的机器就**不显示**这个按钮 —— 摆一个点了没反应的东西更糟。 */
+    var bootVendor = "";
+    try { bootVendor = native.autoStartVendor() || ""; } catch (e) { bootVendor = ""; }
+
+    function paintRemind() {
+      var info = {};
+      try { info = JSON.parse(native.reminderInfo() || "{}") || {}; }
+      catch (e) { info = {}; }
+
+      /* ⚠️ 先分清"拿不到信息"和"信息说没权限"。
+         用户手机会**先看到新页面、再更新 App**，所以"旧壳没有 reminderInfo"
+         是必然会发生的状态。这时候要是按"没权限"报，就等于把人指到
+         一个跟问题无关的地方去（他会去开通知权限，然后发现根本没用）。
+         旧壳就直说旧壳 —— 而且要说清"更新之后就有"。 */
+      if (typeof info.notify !== "boolean") {
+        if (remNext) remNext.textContent = "—";
+        if (remNotifyEl) remNotifyEl.textContent = "—";
+        if (remExactEl) remExactEl.textContent = "—";
+        if (remTest) remTest.hidden = true;
+        if (remPerm) remPerm.hidden = true;
+        if (remExactBtn) remExactBtn.hidden = true;
+        if (remBoot) remBoot.hidden = true;
+        if (remMsg) {
+          remMsg.textContent = "这台 App 还是旧版本，没有到期提醒能力。"
+                             + "更新到新版之后这里就能用了。";
+        }
+        return;
+      }
+      if (remTest) remTest.hidden = false;
+
+      var when = info.when || "";
+      var n = info.count || 0;
+      if (remNext) {
+        remNext.textContent = when
+          ? (when + (n > 1 ? "（" + n + " 条）" : ""))
+          : (info.pending ? "暂时没有安排" : "还没有规划");
+      }
+      if (remNotifyEl) remNotifyEl.textContent = info.notify ? "已开启" : "未开启";
+      if (remExactEl) remExactEl.textContent = info.exact ? "已开启" : "未开启";
+      if (remPerm) remPerm.hidden = !!info.notify;
+      if (remExactBtn) remExactBtn.hidden = !!info.exact;
+      if (remBoot) remBoot.hidden = !bootVendor;
+
+      /* 说明只讲"现在这件事会怎么表现"，不写套话。
+         顺序按"哪个更拦路"排：没有通知权限 → 提醒根本发不出来，得先说。 */
+      var msg;
+      if (!info.notify) {
+        msg = "通知权限没开，到期提醒发不出来。";
+      } else if (!when && !info.pending) {
+        msg = "给规划填一个目标日期，到期当天早上 9:00 就会提醒你。";
+      } else if (!info.exact) {
+        msg = "系统没给「闹钟与提醒」权限，提醒照样会响，但可能晚一会儿。";
+      } else {
+        msg = "到期当天早上 9:00 提醒一次。提醒只在你手机上，不经过服务器。";
+      }
+      if (bootVendor) {
+        msg += "另外，" + bootVendor + "这类系统默认不允许后台自启动 ——"
+             + "不开的话闹钟可能压根不响，建议点上面的「去设置自启动」开一下。";
+      }
+      if (remMsg) remMsg.textContent = msg;
+    }
+
+    if (remTest) {
+      remTest.addEventListener("click", function () {
+        vibrate(12);
+        var ok = false;
+        try { ok = native.testNotify() === true; } catch (e) { ok = false; }
+        /* 给一句明确的话：通知本来就可能被系统静音，
+           只靠"弹没弹"来判断成功与否是不牢靠的。 */
+        say(ok ? "已发出一条测试提醒" : "发不出来 —— 先看通知权限",
+            ok ? "is-ok" : "is-warn");
+        paintRemind();
+      });
+    }
+    if (remPerm) {
+      remPerm.addEventListener("click", function () {
+        try { native.requestNotify(); } catch (e) {}
+      });
+    }
+    if (remExactBtn) {
+      remExactBtn.addEventListener("click", function () {
+        try { native.openExactAlarmSettings(); } catch (e) {}
+      });
+    }
+    if (remBoot) {
+      remBoot.addEventListener("click", function () {
+        try { native.openAutoStartSettings(); } catch (e) {}
+      });
+    }
+
+    /* ⭐ 原生从系统设置页回来时会喊一声，让这块重画。
+       系统设置是**另一个 Activity**、权限弹框压根不是 Activity，
+       WebView 自己收不到任何事件 —— 不主动喊，页面就会一直停在旧状态。 */
+    window.RadarReminderRefresh = paintRemind;
+    paintRemind();
   }
 
   /* ============================================================ 个人规划（App 内）
@@ -803,6 +918,9 @@
     var titleEl  = document.getElementById("plan-title");
     var dueEl    = document.getElementById("plan-due");
     var memoEl   = document.getElementById("plan-memo");
+    var remindEl  = document.getElementById("plan-remind");
+    var remindTxt = document.getElementById("plan-remind-txt");
+    var remindBtn = document.getElementById("plan-remind-btn");
 
     var MAX_ITEMS = 200;
     var PLANS_MAX = 64 * 1024;    // 与 MainActivity 的 PLANS_MAX_BYTES 保持一致
@@ -906,6 +1024,8 @@
       } else {
         note("");
       }
+      /* 存完顺手刷新提醒提示：刚加了一条带日期的，"下一次提醒"就变了 */
+      paintRemind();
       return true;
     }
 
@@ -1097,6 +1217,59 @@
       vibrate(10);
     }
 
+    /* ---------------- 提醒状态 ----------------
+       到期当天早上 9:00 会有一条**系统通知**（跟微信来消息一样）——
+       由原生排程与发送，这里只把"现在是什么情况"翻译成一句话。
+
+       ⚠️ 判断（有没有通知权限、下一次排到哪天）全部来自原生。
+          网页这边自己算的话必然会和原生对不上，而对不上的表现是
+          "看着设好了、实际没响"，属于最难查的一类。 */
+    function paintRemind() {
+      if (!remindEl) return;
+      if (!native) {
+        remindEl.hidden = true;      // 浏览器里没有这回事，别显示
+        return;
+      }
+      var info = {};
+      try { info = JSON.parse(native.reminderInfo() || "{}") || {}; }
+      catch (e) { info = {}; }
+
+      /* ⚠️ 拿不到信息 = 壳还是旧版本（没有 reminderInfo 这个方法）。
+         这时候**整行都别显示**：我们并不知道手机上有没有提醒，
+         与其猜一句，不如不占位置 —— 旧壳本来也就没有提醒这回事。
+         （用户手机会先看到新页面、再更新 App，这个状态是必然会遇到的。） */
+      if (typeof info.notify !== "boolean") {
+        remindEl.hidden = true;
+        return;
+      }
+
+      var txt = "";
+      var btn = "";
+      if (!info.notify) {
+        /* 没有通知权限 = 提醒根本发不出来。这是最拦路的一条，先说它。 */
+        txt = "⚠️ 通知权限没开，到期提醒发不出来。";
+        btn = "开启通知";
+      } else if (!info.pending) {
+        txt = "给规划填一个目标日期，到期当天早上 9:00 就提醒你。";
+      } else if (!info.exact) {
+        txt = "到期当天早上 9:00 提醒你（系统没给准点权限，可能晚一会儿）。";
+      } else {
+        txt = "到期当天早上 9:00 提醒你。";
+      }
+      remindTxt.textContent = txt;
+      remindBtn.textContent = btn;
+      remindBtn.hidden = !btn;
+      remindEl.hidden = false;
+    }
+
+    if (remindBtn) {
+      remindBtn.addEventListener("click", function () {
+        /* 原生会自己判断"该弹框问、还是直接送系统设置页" —— 权限弹框一辈子
+           只有一次机会，第二次再调就是不出声的空转，那种细节不该让网页猜。 */
+        try { native.requestNotify(); } catch (e) {}
+      });
+    }
+
     /* ---------------- 开关面板 ---------------- */
 
     function isOpen() { return !modal.hidden; }
@@ -1110,6 +1283,7 @@
       if (webBox) webBox.hidden = app;
       if (appBox) appBox.hidden = !app;
       if (app) render();
+      if (app) paintRemind();
 
       modal.hidden = false;
       document.body.classList.add("plans-open");
@@ -1135,6 +1309,17 @@
     btn.addEventListener("click", function () {
       if (isOpen()) close(); else open();
     });
+
+    /* ⭐ 给原生用的钩子：点"到期提醒"的通知进来时，原生会调它把面板掀开。
+       必须挂成 **window 上的全局函数** —— 原生是从 WebView 外面调的，
+       拿不到这个 IIFE 里的任何东西。
+
+       页面里没有这个函数时（比如当时停在阅读器页），原生会先回首页再试 ——
+       详见 MainActivity.dispatchPendingPanel。钩子带不带返回值只在那边用得上，
+       这里按普通函数写就行。 */
+    window.RadarPlansOpen = function () {
+      if (!isOpen()) open();
+    };
 
     Array.prototype.forEach.call(modal.querySelectorAll("[data-plans-close]"), function (el) {
       el.addEventListener("click", close);
