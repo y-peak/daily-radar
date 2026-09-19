@@ -1,0 +1,26 @@
+[Unit]
+Description=个人情报台 每日采集（daily-radar run all）
+Documentation=file:///root/daily-radar/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/daily-radar
+
+# ⚠️ 采集任务同样要加载 .env —— 大模型的 key（RADAR_LLM_KEY）在这里面。
+#    漏了这行不会报错，只会安静地降级：翻译退回免 key 接口、中文介绍整段不生成。
+#    前面这个 `-` 表示文件不存在也不报错（没配 key 的机器照样能跑）。
+EnvironmentFile=-/root/daily-radar/.env
+
+ExecStart=/root/daily-radar/.venv/bin/python -m radar run all
+
+# GitHub 抓取要多 IP 重试（上限 120s），加上行情与两融，给 30 分钟很宽裕
+TimeoutStartSec=1800
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=radar-collect
+
+NoNewPrivileges=true
+PrivateTmp=true

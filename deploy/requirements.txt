@@ -1,0 +1,20 @@
+# 运行时依赖（服务器）
+#
+# 只列真正 import 到的第三方包，保持最小面：
+#   flask       —— radar/web.py 提供 Web 服务
+#   jinja2      —— 模板渲染（radar/core/render.py 直接 import）
+#   markupsafe  —— 图表过滤器要产出 Markup（charts.py），是 jinja2 的依赖但显式列出
+#   latex2mathml —— 读书模块把 LaTeX 转 MathML（纯 Python，零依赖）
+#
+# ⚠️ latex2mathml 是**可选**依赖：没装也不会崩，公式会可见降级成纯文本 TeX
+#    （见 radar/modules/reader/render.py::_to_mathml）。所以它排在这里是
+#    "应当装上"，不是"不装就起不来"。
+#
+# ⚠️⚠️ 版本必须**钉死**，而且要注意内网 PyPI 有滞后（火山源最高只到 3.78.1）。
+#    公式渲染是构建期在服务器上跑出来的：本地 3.81.1 渲出来的 MathML 和服务器
+#    3.78.1 不一定一样，而"本地看着好好的、线上是另一套"是最难查的一类偏差。
+#    装的时候配 `-i https://pypi.org/simple/`（见 deploy/install.sh）。
+flask
+jinja2
+markupsafe
+latex2mathml==3.81.1

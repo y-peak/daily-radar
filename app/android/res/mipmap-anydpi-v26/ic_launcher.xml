@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  自适应图标（Android 8+）。不写这个的话，系统会把普通 PNG 硬塞进一个白色圆圈里，
+  图标会明显缩一圈 —— 桌面上一眼就能看出来"这 App 没做完"。
+
+  前景直接用 PWA 的 maskable 图标：它本来就留了 20% 安全边距，
+  正好符合自适应图标"前景只占中间 66%"的要求，不用另做素材。
+-->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/ic_launcher_background" />
+    <foreground android:drawable="@mipmap/ic_launcher_foreground" />
+</adaptive-icon>

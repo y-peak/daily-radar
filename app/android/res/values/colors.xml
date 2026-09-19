@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  配色直接对齐站点（radar/core/render.py 里的 theme_color / background_color），
+  这样启动瞬间的底色和页面底色一致，不会闪一下白或黑。
+-->
+<resources>
+    <color name="brand">#1f6feb</color>
+    <color name="brand_bg">#f6f7f9</color>
+    <color name="brand_text">#1f2328</color>
+    <color name="ic_launcher_background">#1f6feb</color>
+</resources>

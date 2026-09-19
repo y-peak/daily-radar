@@ -1,0 +1,93 @@
+{# 第 1 层：书房（/reader/）。
+   一本书一张卡：标题、体量、进度、来源出处。
+   进度是**客户端**读 localStorage 算的（静态站没有后端状态），
+   所以这里只埋 data-* 供 app.js 填充，服务端渲染出来是"未开始"。 #}
+
+{% if not dates %}
+<div class="empty">
+  <p><strong>{{ module.title }}</strong> 还没有内容。</p>
+  <p class="hint">把书稿放到 <code>radar/static/books/</code> 后执行
+    <code>python3 -m radar run reader</code>。</p>
+</div>
+{% else %}
+
+{% set books = data.get('books', []) %}
+{% set totals = data.get('totals', {}) %}
+
+{# ---- 继续阅读：跨书取最近读的那一章。默认隐藏，有记录才由 JS 显示 ---- #}
+<div class="resume" id="resume" hidden>
+  <a class="resume-link" id="resume-link" href="#">
+    <span class="resume-k">继续阅读</span>
+    <span class="resume-t">
+      <strong id="resume-chapter">—</strong>
+      <i id="resume-book">—</i>
+    </span>
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+  </a>
+</div>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>书架</h2>
+    <span class="badge muted">{{ totals.get('books', 0) }} 本 ·
+      {{ totals.get('chapters', 0) }} 章 · {{ totals.get('chars_text', '') }}</span>
+  </div>
+  <p class="lede">正文与插图都放在本站，断网也能读；书稿按 commit 钉死，
+    和上游仓库是否可达无关。</p>
+
+  <div class="shelf">
+    {% for b in books %}
+    <a class="book-card {{ b.get('accent', 'blue') }}"
+       href="/reader/{{ b.slug }}/"
+       data-book="{{ b.slug }}"
+       data-book-title="{{ b.title }}"
+       data-chapters="{{ b.count }}">
+      <span class="spine" aria-hidden="true"></span>
+      <div class="bk-main">
+        <h3 class="bk-title">{{ b.title }}</h3>
+        <p class="bk-sub">{{ b.get('subtitle', '') }}</p>
+        <p class="bk-sum">{{ b.get('summary', '') }}</p>
+        <div class="bk-stats">
+          <span><b>{{ b.count }}</b> 章</span>
+          <i class="dot"></i>
+          <span>{{ b.get('chars_text', '') }}</span>
+          <i class="dot"></i>
+          <span>{{ b.get('duration_text', '') }}</span>
+        </div>
+      </div>
+      {# 进度条：宽度由 app.js 按 localStorage 里的已完成章节数填充 #}
+      <div class="bk-progress" title="阅读进度">
+        <i style="width:0%"></i>
+        <span class="bk-progress-t">未开始</span>
+      </div>
+      <div class="bk-foot">
+        <span>{{ b.get('author', '') }}</span>
+        <i class="dot"></i>
+        <span>{{ b.get('license', '') }}</span>
+        <i class="dot"></i>
+        <span class="num">@{{ (b.get('commit') or '')[:8] }}</span>
+      </div>
+    </a>
+    {% endfor %}
+  </div>
+
+  <div class="shelf-total">
+    合计 {{ totals.get('chapters', 0) }} 章 · {{ totals.get('chars_text', '') }} ·
+    约 {{ totals.get('duration_text', '') }} · {{ totals.get('figures', 0) }} 张插图
+  </div>
+
+  {% if totals.get('problems') %}
+  <p class="notice warn">有 {{ totals.get('problems') }} 处内容异常（缺章或文件不完整），
+    日志里有明细。</p>
+  {% endif %}
+</section>
+
+{% if report_html %}
+<section class="panel">
+  <details class="fold">
+    <summary>内容清单</summary>
+    <div class="prose">{{ report_html|safe }}</div>
+  </details>
+</section>
+{% endif %}
+{% endif %}

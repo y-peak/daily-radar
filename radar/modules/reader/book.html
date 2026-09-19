@@ -1,0 +1,73 @@
+{# 第 2 层：单本书（/reader/<book>/）。
+   主体是目录。每章是一个 <details>，展开能看到该章的小节 —— 用原生折叠，
+   不引 JS；这样"手机上想找某一节"不用先进章节页再翻。 #}
+
+<div class="book-hero {{ book.get('accent', 'blue') }}">
+  <a class="crumb" href="/reader/">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg>
+    书架
+  </a>
+  <h1 class="book-h1">{{ book.title }}</h1>
+  <p class="book-sub">{{ book.get('subtitle', '') }}</p>
+  <p class="book-sum">{{ book.get('summary', '') }}</p>
+  <div class="book-facts">
+    <span><b>{{ book.count }}</b> 章</span>
+    <i class="dot"></i>
+    <span>{{ book.get('chars_text', '') }}</span>
+    <i class="dot"></i>
+    <span>约 {{ book.get('duration_text', '') }}</span>
+    <i class="dot"></i>
+    <span>{{ book.get('figures', 0) }} 图</span>
+  </div>
+  <div class="book-actions">
+    <a class="btn primary" href="/reader/{{ book.slug }}/{{ (book.chapters[0].slug if book.chapters else '') }}.html"
+       data-resume-book="{{ book.slug }}">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg>
+      <span id="book-cta-text">开始阅读</span>
+    </a>
+  </div>
+</div>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>目录</h2>
+    <span class="badge muted">{{ book.count }} 章</span>
+  </div>
+
+  <ol class="toc">
+    {% for c in book.chapters %}
+    <li class="toc-item" data-chapter="{{ c.slug }}">
+      <div class="toc-row">
+        <a class="toc-link" href="/reader/{{ book.slug }}/{{ c.slug }}.html">
+          <span class="toc-no num">{{ '%02d'|format(loop.index) }}</span>
+          <span class="toc-t">{{ c.title }}</span>
+        </a>
+        <span class="toc-meta">{{ c.get('chars_text', '') }} · {{ c.get('duration_text', '') }}</span>
+        {% if c.toc %}
+        <details class="toc-sub">
+          <summary aria-label="展开小节"></summary>
+          <ul>
+            {% for h in c.toc %}
+            <li class="lv{{ h.level }}">
+              <a href="/reader/{{ book.slug }}/{{ c.slug }}.html#{{ h.anchor }}">{{ h.text }}</a>
+            </li>
+            {% endfor %}
+          </ul>
+        </details>
+        {% endif %}
+      </div>
+    </li>
+    {% endfor %}
+  </ol>
+</section>
+
+<section class="panel">
+  <h2>出处</h2>
+  <ul class="meta-list">
+    <li><span>仓库</span><a href="{{ book.get('repo', '#') }}" target="_blank" rel="noopener">{{ book.get('repo', '') }}</a></li>
+    <li><span>作者</span>{{ book.get('author', '') }}</li>
+    <li><span>许可</span>{{ book.get('license', '') }}</li>
+    <li><span>版本</span><code>{{ (book.get('commit') or '')[:12] }}</code></li>
+  </ul>
+  <p class="hint">本站保存的是该 commit 下的正文与插图快照，不随上游变化。</p>
+</section>

@@ -1,0 +1,83 @@
+{# 总览：问候 + 模块卡（一卡一行：图标/标题/hero 数字/趋势迷你图/时间戳）。
+   数据从 build_index 现算，m.latest / m.subtitle / m.days / m.schedule 都已经在。
+   加上两天 hero 数据：每个模块挑 1 个最能代表今天的数（n / delta）。
+   hero 字段由模块调用 build_index 时自己注入；这里是基线渲染，缺字段就降级。 #}
+
+{% if index.modules %}
+<div class="mod-grid">
+  {% for m in index.modules %}
+  <a class="mod-card {% if m.latest == today %}fresh{% endif %}"
+     data-fresh="{{ m.latest or '' }}"
+     href="/{{ m.name }}/">
+
+    <div class="head">
+      {# 内联 SVG 图标 —— 不再走"标题首字"那套（无图标资源，每个模块各有视觉锚点）。
+         按模块名匹配：market_flow → 折线，github_trending → GitHub mark。
+         通用兜底是矩形 grid icon（雷达/行情类）。 #}
+      <span class="glyph" aria-hidden="true">
+        {% if m.name == 'market_flow' %}
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M7 15l3-3 4 4 5-6"/></svg>
+        {% elif m.name == 'github_trending' %}
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 00-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0020 4.77 5.07 5.07 0 0019.91 1S18.73.65 16 2.48a13.38 13.38 0 00-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 005 4.77a5.44 5.44 0 00-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 009 18.13V22"/></svg>
+        {% elif m.name == 'reader' %}
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M4 4.5A2.5 2.5 0 016.5 2H20v20H6.5A2.5 2.5 0 014 19.5z"/><path d="M9 7h7M9 11h5"/></svg>
+        {% else %}
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+        {% endif %}
+      </span>
+      <div class="title-wrap">
+        <h3 class="title">{{ m.title }}</h3>
+        <div class="meta">
+          {% if m.latest %}
+          <span>数据 {{ m.latest[5:] }}</span>
+          <i class="dot"></i>
+          <span>累计 {{ m.days }} 天</span>
+          {% else %}
+          <span class="flat">还没有数据</span>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+
+    {% if m.hero %}
+    <div class="hero">
+      <span class="num" data-countup="{{ m.hero.value }}" data-countup-suffix="{{ m.hero.suffix or '' }}">
+        {{ m.hero.value }}{{ m.hero.suffix or '' }}
+      </span>
+      {% if m.hero.delta is not none %}
+      <span class="delta {% if m.hero.delta > 0 %}up{% elif m.hero.delta < 0 %}down{% else %}flat{% endif %}">
+        {% if m.hero.delta > 0 %}+{% endif %}{{ '%.2f'|format(m.hero.delta) }}{{ m.hero.suffix or '' }}
+      </span>
+      {% endif %}
+    </div>
+    {% endif %}
+
+    {% if m.trend %}
+    {# 服务端烘入的迷你折线 —— 横跨底部一行，让视觉"承接"card 设计感。
+       趋势数据用模块自带的多日序列（见 build_index 注入），不跨日期文件读。 #}
+    <div class="legend">
+      <svg class="sparkline-thumb" viewBox="0 0 200 32" preserveAspectRatio="none" aria-hidden="true">
+        <polyline fill="none" stroke="currentColor" stroke-width="1.5"
+          points="{{ m.trend.points }}"/>
+        <polyline fill="currentColor" fill-opacity="0.12" stroke="none"
+          points="{{ m.trend.area }}"/>
+      </svg>
+      <span class="label">{{ m.trend.label or '7 日趋势' }}</span>
+    </div>
+    {% else %}
+    {% if m.subtitle %}
+    <p class="card-sub" style="margin-top:14px;color:var(--text-dim);font-size:13px">{{ m.subtitle }}</p>
+    {% endif %}
+    {% endif %}
+  </a>
+  {% endfor %}
+</div>
+{% else %}
+<div class="empty">
+  <span class="glyph">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v6M12 17h.01"/></svg>
+  </span>
+  <p>还没有任何模块产出数据。</p>
+  <p class="hint">在服务器上执行：<code>python3 -m radar run all</code></p>
+</div>
+{% endif %}

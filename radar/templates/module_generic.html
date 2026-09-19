@@ -1,0 +1,26 @@
+{% if not dates %}
+<div class="empty">
+  <p><strong>{{ module.title }}</strong> 还没有数据。</p>
+  <p class="hint">执行 <code>python3 -m radar run {{ module.name }}</code> 生成。</p>
+</div>
+{% else %}
+
+{% if report_html %}
+<section class="panel">
+  <h2>结论</h2>
+  <div class="prose">{{ report_html | safe }}</div>
+</section>
+{% endif %}
+
+{# 兜底模板给"还没写自己模板"的模块用。原始 JSON 默认折叠 ——
+   它是排查问题时才需要的东西，不该在正文里占掉一整屏，
+   但也不能藏起来（那会让人以为模块没输出数据）。 #}
+<section class="panel">
+  <h2>结构化数据</h2>
+  <details class="fold">
+    <summary>展开原始 JSON（{{ data | length }} 个顶层字段）</summary>
+    <pre class="json">{{ data | tojson(indent=2) }}</pre>
+  </details>
+</section>
+
+{% endif %}

@@ -1,0 +1,88 @@
+{# 第 3 层：章节阅读页。
+   这是真正"读"的地方，所以一切让位于正文：窄栏、够大的行距、克制的装饰。
+   顶部的阅读进度条由 app.js 按滚动填充；读完自动记进度到 localStorage。 #}
+
+<div class="reader" data-book="{{ book.slug }}" data-book-title="{{ book.title }}"
+     data-chapter="{{ chapter.slug }}" data-chapter-title="{{ chapter.title }}"
+     data-total="{{ total }}">
+
+  <div class="read-bar" aria-hidden="true"><i id="read-bar-fill" style="width:0%"></i></div>
+
+  <header class="read-head">
+    <a class="crumb" href="/reader/{{ book.slug }}/">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg>
+      {{ book.title }}
+    </a>
+    <p class="read-pos num">第 {{ index + 1 }} / {{ total }} 篇</p>
+    <h1 class="read-title">{{ chapter.title }}</h1>
+    <div class="read-facts">
+      <span>{{ chapter.get('chars_text', '') }}</span>
+      <i class="dot"></i>
+      <span>约 {{ chapter.get('duration_text', '') }}</span>
+      {% if chapter.figures %}<i class="dot"></i><span>{{ chapter.figures }} 图</span>{% endif %}
+    </div>
+  </header>
+
+  {% if headings %}
+  <details class="read-toc">
+    <summary>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
+      本节大纲
+      <span class="read-toc-n num">{{ headings|length }}</span>
+    </summary>
+    <ul>
+      {% for h in headings %}
+      <li class="lv{{ h.level }}"><a href="#{{ h.anchor }}">{{ h.text }}</a></li>
+      {% endfor %}
+    </ul>
+  </details>
+  {% endif %}
+
+  <article class="book-content">
+    {{ html|safe }}
+  </article>
+
+  <nav class="read-nav">
+    {% if prev %}
+    <a class="rn prev" href="/reader/{{ book.slug }}/{{ prev.slug }}.html">
+      <span class="rn-k">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5M11 18l-6-6 6-6"/></svg>
+        上一篇
+      </span>
+      <strong>{{ prev.title }}</strong>
+    </a>
+    {% else %}
+    <a class="rn prev" href="/reader/{{ book.slug }}/">
+      <span class="rn-k">返回目录</span>
+      <strong>{{ book.title }}</strong>
+    </a>
+    {% endif %}
+    {% if next %}
+    <a class="rn next" href="/reader/{{ book.slug }}/{{ next.slug }}.html">
+      <span class="rn-k">
+        下一篇
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+      </span>
+      <strong>{{ next.title }}</strong>
+    </a>
+    {% else %}
+    <a class="rn next" href="/reader/{{ book.slug }}/">
+      <span class="rn-k">已到最后一篇</span>
+      <strong>返回目录</strong>
+    </a>
+    {% endif %}
+  </nav>
+
+  <div class="read-foot">
+    <button type="button" class="btn ghost" id="mark-read" aria-pressed="false">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg>
+      <span id="mark-read-text">标记为已读</span>
+    </button>
+    <span class="read-src">
+      内容来自
+      <a href="{{ book.get('repo', '#') }}" target="_blank" rel="noopener">{{ book.title }}</a>
+      · {{ book.get('license', '') }} ·
+      <code>{{ (book.get('commit') or '')[:8] }}</code>
+    </span>
+  </div>
+</div>

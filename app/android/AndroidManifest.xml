@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  个人情报台 —— 安卓壳
+  ~~~~~~~~~~~~~~~~~~~
+  这是一个**真的 APK**，不是网页快捷方式。
+
+  为什么要自己做壳：小米（国行 HyperOS / MIUI）自带浏览器不支持 PWA 安装，
+  只会生成一个"书签快捷方式"——打开还是浏览器，看起来就跟网页一样。
+  而且国行小米普遍没有 Google Play，装不了 Chrome/Edge，所以
+  "用 Chrome 打开再添加到主屏幕"这条路在用户的机器上走不通。
+
+  壳本身很薄：一个全屏 WebView 加载线上站点。内容仍然由服务器渲染，
+  所以改页面不用重新发版（和 PWA 一样的更新机制，靠指纹轮询自动 reload）。
+
+  targetSdk 35：Android 15 起要求 targetSdk >= 24 才允许安装；
+  另外 targetSdk >= 30 时 launcher activity **必须**显式写 android:exported。
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.ypeak.radar">
+
+    <!--
+      versionCode / versionName 交给 build.sh 的参数给（单一来源，
+      免得改了脚本里的版本号、manifest 里还是旧的）。
+      注意：XML 注释里不能出现连续两个减号，所以上面那两个参数名这里就不复述了。
+      uses-sdk 写在这里是为了让 manifest 自己说清底线（API 24 起）。
+    -->
+    <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="35" />
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- 手机（竖屏为主），不需要任何硬件特性，别让应用商店/系统误判为不兼容 -->
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+
+    <application
+        android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher"
+        android:theme="@style/AppTheme"
+        android:allowBackup="true"
+        android:supportsRtl="false"
+        android:hardwareAccelerated="true"
+        android:usesCleartextTraffic="false">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:launchMode="singleTask"
+            android:screenOrientation="portrait"
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize|uiMode">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

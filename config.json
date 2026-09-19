@@ -1,0 +1,83 @@
+{
+  "app": {
+    "name": "个人情报台",
+    "short_name": "情报台",
+    "version": "0.1.0"
+  },
+
+  "server": {
+    "host": "0.0.0.0",
+    "port": 18090,
+    "token": ""
+  },
+
+  "storage": {
+    "data_dir": "data",
+    "public_dir": "public",
+    "keep_days": 400
+  },
+
+  "http": {
+    "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+    "timeout": 15,
+    "min_interval": 0.8,
+    "retries": 3,
+    "backoff": 1.6
+  },
+
+  "llm": {
+    "enabled": true,
+    "provider": "deepseek",
+    "model": "deepseek-flash",
+    "api_key_env": "RADAR_LLM_KEY",
+    "api_key": "",
+    "timeout": 90,
+    "max_tokens": 2000,
+    "max_retry_tokens": 8000,
+    "temperature": 0.3
+  },
+
+  "modules": {
+    "github_trending": {
+      "enabled": true,
+      "since": "daily",
+      "top_n": 10,
+      "api_enrich": true,
+      "github_token": "",
+      "translate": {
+        "enabled": true,
+        "providers": ["youdao", "mymemory"]
+      },
+      "summarize": {
+        "enabled": true,
+        "max_items": 10,
+        "max_tokens": 2000
+      },
+      "fetch": {
+        "host": "github.com",
+        "path": "/trending",
+        "candidate_ips": [
+          "140.82.114.3", "140.82.112.3", "140.82.121.3", "140.82.113.3",
+          "140.82.112.4", "140.82.113.4", "140.82.114.4", "140.82.121.4"
+        ],
+        "timeout": 15,
+        "attempts": 3,
+        "deadline": 120
+      }
+    },
+
+    "market_flow": {
+      "enabled": true,
+      "top_n": 10,
+      "stock_top_n": 15,
+      "global": true,
+      "breadth": true,
+      "margin": true
+    },
+
+    "reader": {
+      "enabled": true,
+      "note": "书稿是钉死的资产，collect 不联网；更新内容是显式操作（见 radar/modules/reader/books.py 的 commit）"
+    }
+  }
+}

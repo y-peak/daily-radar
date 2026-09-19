@@ -1,0 +1,289 @@
+{% if not dates %}
+<div class="empty">
+  <p><strong>{{ module.title }}</strong> 还没有数据。</p>
+  <p class="hint">执行 <code>python3 -m radar run market_flow</code> 生成。</p>
+</div>
+{% else %}
+{# 一律用 .get 取值：历史页面是半年后也要能打开的静态快照，
+   某个字段是后来才加的，老页面不该因此整页报错。 #}
+{% set summary = data.get('summary', {}) %}
+{% set signals = data.get('signals', []) %}
+{% set breadth = data.get('breadth', {}) %}
+{% set margin = data.get('margin', {}) %}
+{% set industry = data.get('industry', {'inflow': [], 'outflow': []}) %}
+{% set concept = data.get('concept', {'inflow': [], 'outflow': []}) %}
+{% set stock = data.get('stock', {'inflow': [], 'outflow': []}) %}
+{% set cn_indices = data.get('cn_indices', []) %}
+
+{# ============================================================ Hero — 4 个核心指数
+   替代原来的"标题 + 表" ——
+   因为 4 行小表在手机上要么横滑、要么字太小看不清哪个数属于哪个指数。
+   改用 stat-cell 4 列网格：每个 cell 内含 价格 + 涨跌幅，
+   涨跌幅用品牌化的 pill 框，配合背景微染色，一眼分辨红/绿。 #}
+{% if cn_indices %}
+<section class="panel">
+  <div class="panel-head">
+    <h2>今天怎么样</h2>
+    {% if summary.amount_total_text and summary.amount_total_text != '—' %}
+    <span class="badge muted">两市 {{ summary.amount_total_text }}</span>
+    {% endif %}
+  </div>
+  <div class="hero-row">
+    {% for i in cn_indices[:4] %}
+    <div class="stat-cell {{ i.tone }}">
+      <div class="label">
+        <span>{{ i.name }}</span>
+        <span class="num" style="font-size:11px;color:var(--text-faint)">{{ i.code }}</span>
+      </div>
+      <span class="num" data-countup="{{ i.price }}" data-countup-decimals="2">{{ i.price_text }}</span>
+      <span class="pct {{ i.tone }}">{{ i.pct_text }}</span>
+    </div>
+    {% endfor %}
+  </div>
+
+  {# 广度结论 —— 一条堆叠 + 一句话总结
+     整个站最重要的高频信号："今天 70% 的股在涨/跌"。 #}
+  {% if breadth and breadth.total %}
+  <div class="breadth" style="margin-top:18px">
+    <div class="breadth-bar" role="img"
+         aria-label="上涨 {{ breadth.up }} 家，平盘 {{ breadth.flat }} 家，下跌 {{ breadth.down }} 家">
+      <i class="seg up"   style="width:{{ (breadth.up / breadth.total * 100) | round(2) }}%"></i>
+      <i class="seg flat" style="width:{{ (breadth.flat / breadth.total * 100) | round(2) }}%"></i>
+      <i class="seg down" style="width:{{ (breadth.down / breadth.total * 100) | round(2) }}%"></i>
+    </div>
+    <div class="breadth-legend">
+      <span class="lg"><i class="sw up"></i>上涨 <strong class="up num">{{ breadth.up }}</strong></span>
+      <span class="lg"><i class="sw flat"></i>平/停 <strong class="num">{{ breadth.flat }}</strong></span>
+      <span class="lg"><i class="sw down"></i>下跌 <strong class="down num">{{ breadth.down }}</strong></span>
+      <span class="breadth-pct">{{ breadth.up_ratio }}% 在涨</span>
+    </div>
+  </div>
+  {% endif %}
+</section>
+{% endif %}
+
+{# ============================================================ 结论摘要 #}
+{% if signals %}
+<section class="panel">
+  <h2>结论摘要</h2>
+  <ul class="rank">
+    {% for sig in signals %}
+    <li>
+      <span class="rank-no">{{ loop.index }}</span>
+      <div class="rank-body">
+        <div class="rank-title">
+          <strong>{{ sig.title }}</strong>
+          {% if sig.level == 'warn' %}<span class="badge warn">注意</span>
+          {% elif sig.level == 'ok' %}<span class="badge ok">利好</span>
+          {% else %}<span class="badge muted">观察</span>{% endif %}
+        </div>
+        <p class="rank-desc">{{ sig.text }}</p>
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+
+{# ============================================================ 全球指数 — 一个小表 #}
+{% set global_indices = data.get('global_indices', []) %}
+{% if global_indices %}
+<section class="panel">
+  <h2>全球指数 <span style="font-weight:400;font-size:12px">（最近收盘）</span></h2>
+  <div class="table-wrap">
+    <table class="tbl">
+      <thead><tr><th>指数</th><th>最新</th><th>涨跌幅</th></tr></thead>
+      <tbody>
+        {% for i in global_indices %}
+        <tr>
+          <td>{{ i.name }}</td>
+          <td class="num">{{ i.price_text }}</td>
+          <td class="num {{ i.tone }}">{{ i.pct_text }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endif %}
+
+{# ============================================================ 板块资金流（两表合并，区分行业 / 概念） #}
+{# 两段窄表（行业 + 概念）合成一段。手机上换行显示，桌面并排。每段都标 OUT 标签。
+   重要的：行首仍是 name，跟主表保持一致视觉。 #}
+{% for label, block in [('行业板块资金流', industry), ('概念板块资金流', concept)] %}
+<section class="panel">
+  <div class="panel-head">
+    <h2>{{ label }}</h2>
+    <span class="badge ok">净流入 TOP</span>
+  </div>
+  <div class="table-wrap">
+    <table class="tbl">
+      <thead>
+        <tr><th>名称</th><th>涨跌幅</th><th>主力净流入</th><th>占比</th>
+            <th class="col-opt">超大单</th><th class="col-opt">小单</th></tr>
+      </thead>
+      <tbody>
+        {% for it in block.inflow[:8] %}
+        <tr>
+          <td>{{ it.name }}</td>
+          <td class="num {{ it.tone }}">{{ it.pct_text }}</td>
+          <td class="num {{ it.flow_tone }}">{{ it.flow_text }}</td>
+          <td class="num">{% if it.flow_pct is not none %}{{ it.flow_pct }}%{% else %}—{% endif %}</td>
+          <td class="num col-opt">{{ it.super_text }}</td>
+          <td class="num col-opt">{{ it.small_text }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% if block.outflow %}
+  <div class="rank-meta" style="margin-top:10px">
+    <span class="badge warn">净流出前列</span>
+    {% for it in block.outflow[:5] %}<span class="tag">{{ it.name }} {{ it.flow_text }}</span>{% endfor %}
+  </div>
+  {% endif %}
+</section>
+{% endfor %}
+
+{# ============================================================ 个股主力 #}
+<section class="panel">
+  <div class="panel-head">
+    <h2>个股主力资金</h2>
+    <span class="badge ok">净流入 TOP</span>
+  </div>
+  <div class="table-wrap">
+    <table class="tbl">
+      <thead><tr><th>名称</th><th>涨跌幅</th><th>主力净流入</th><th>占比</th>
+                 <th class="col-opt">超大单</th></tr></thead>
+      <tbody>
+        {% for it in stock.inflow[:8] %}
+        <tr>
+          <td>{{ it.name }}</td>
+          <td class="num {{ it.tone }}">{{ it.pct_text }}</td>
+          <td class="num {{ it.flow_tone }}">{{ it.flow_text }}</td>
+          <td class="num">{% if it.flow_pct is not none %}{{ it.flow_pct }}%{% else %}—{% endif %}</td>
+          <td class="num col-opt">{{ it.super_text }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% if stock.outflow %}
+  <div class="rank-meta" style="margin-top:10px">
+    <span class="badge warn">净流出前列</span>
+    {% for it in stock.outflow[:5] %}<span class="tag">{{ it.name }} {{ it.flow_text }}</span>{% endfor %}
+  </div>
+  {% endif %}
+</section>
+
+{# ============================================================ 两融（杠杆资金） #}
+{% if margin %}
+{# trend 是采集时就冻在快照里的多日序列（新→旧），所以这里能直接画走势，
+   不需要回头读别的日期文件 —— 历史页面因此永远显示"当时看到的那条曲线"。 #}
+{% set chrono = (margin.get('trend') or []) | reverse | list %}
+{% set rzye_vals = chrono | map(attribute='rzye') | select('number') | list %}
+{% set rzjme_vals = chrono | map(attribute='rzjme') | select('number') | list %}
+{% set pct_vals = chrono | map(attribute='pct') | select('number') | list %}
+<section class="panel">
+  <div class="panel-head">
+    <h2>两融（杠杆资金）</h2>
+    {% if margin.delta is not none %}
+    <span class="badge {% if margin.delta > 0 %}ok{% else %}muted{% endif %}">
+      较前日 {{ '%+.2f'|format(margin.delta) }} 亿
+    </span>
+    {% endif %}
+  </div>
+  <div class="rank-meta" style="margin-bottom:14px">
+    <span>{{ margin.date }}</span>
+    <span class="dot">·</span>
+    <span>融资余额 <strong class="num">{{ '%.0f'|format(margin.rzye) }} 亿</strong></span>
+    {% if margin.rzjme is not none %}
+    <span class="dot">·</span>
+    <span>净买入 <span class="num {{ 'up' if margin.rzjme > 0 else 'down' }}">{{ '%+.2f'|format(margin.rzjme) }} 亿</span></span>
+    {% endif %}
+  </div>
+
+  {% if chrono | length >= 2 %}
+  <div class="charts">
+    {% if rzye_vals | length >= 2 %}
+    <figure class="chart">
+      <figcaption><span>融资余额</span><span class="chart-unit">亿元</span></figcaption>
+      {{ rzye_vals | spark(width=300, height=42, fill=true) }}
+      <div class="chart-axis">
+        <span>{{ chrono[0].date[5:] }}</span>
+        <span class="num">{{ rzye_vals | min | round | int }} – {{ rzye_vals | max | round | int }}</span>
+        <span>{{ chrono[-1].date[5:] }}</span>
+      </div>
+    </figure>
+    {% endif %}
+    {% if rzjme_vals | length >= 2 %}
+    <figure class="chart">
+      <figcaption><span>融资净买入</span><span class="chart-unit">亿元</span></figcaption>
+      {{ rzjme_vals | bars(width=300, height=42) }}
+      <div class="chart-axis">
+        <span>{{ chrono[0].date[5:] }}</span>
+        <span class="num">{{ rzjme_vals | min | round(1) }} – {{ rzjme_vals | max | round(1) }}</span>
+        <span>{{ chrono[-1].date[5:] }}</span>
+      </div>
+    </figure>
+    {% endif %}
+    {% if pct_vals | length >= 2 %}
+    <figure class="chart">
+      <figcaption><span>指数涨跌</span><span class="chart-unit">%</span></figcaption>
+      {{ pct_vals | bars(width=300, height=42) }}
+      <div class="chart-axis">
+        <span>{{ chrono[0].date[5:] }}</span>
+        <span class="num">{{ pct_vals | min | round(2) }}% – {{ pct_vals | max | round(2) }}%</span>
+        <span>{{ chrono[-1].date[5:] }}</span>
+      </div>
+    </figure>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  <details class="fold" style="margin-top:12px">
+    <summary>展开明细（{{ margin.trend | length }} 条）</summary>
+    <table class="tbl">
+      <thead><tr><th>日期</th><th>融资余额(亿)</th><th>净买入(亿)</th><th class="col-opt">指数涨跌%</th></tr></thead>
+      <tbody>
+        {% for row in margin.trend %}
+        <tr>
+          <td>{{ row.date }}</td>
+          <td class="num">{{ row.rzye if row.rzye is not none else '—' }}</td>
+          <td class="num">{{ row.rzjme if row.rzjme is not none else '—' }}</td>
+          <td class="num col-opt">{{ row.pct if row.pct is not none else '—' }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </details>
+</section>
+{% endif %}
+
+{% if report_html %}
+<section class="panel">
+  <h2>完整报告</h2>
+  <div class="prose">{{ report_html | safe }}</div>
+</section>
+{% endif %}
+
+{# 数据完整性 #}
+{% set ok_sources = data.get('ok_sources', []) %}
+{% set errors = data.get('errors', {}) %}
+<section class="panel">
+  <h2>数据完整性</h2>
+  <div class="rank-meta">
+    <span>成功 {{ ok_sources | length }} 项</span>
+    <span class="dot">·</span>
+    <span>{{ data.get('fetched_at') or '—' }}</span>
+  </div>
+  {% if errors %}
+  <div class="rank-meta" style="margin-top:8px">
+    {% for k, v in errors.items() %}
+    <span class="badge warn">{{ k }} 缺失</span>
+    {% endfor %}
+  </div>
+  {% endif %}
+</section>
+
+{% endif %}

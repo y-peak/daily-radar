@@ -1,0 +1,181 @@
+{% if not dates %}
+<div class="empty">
+  <p><strong>{{ module.title }}</strong> 还没有数据。</p>
+  <p class="hint">执行 <code>python3 -m radar run github_trending</code> 生成。</p>
+</div>
+{% else %}
+{# 用 .get 取值：数据文件是半年后也照样能打开的历史快照，
+   万一某个字段是后来才加的，老页面不该因此整页报错。 #}
+{% set repos = data.get('repos', []) %}
+{% set stats = data.get('stats', {}) %}
+{% set source = data.get('source', {}) %}
+
+{# 增长条的参照系：今天涨得最猛的那个。没有它，"+2265 ★" 到底是多是少读者无从判断。
+   先收成 list 再取 max：空序列直接 |max 会拿到 Undefined，而 Undefined 一旦被
+   float() 会抛 UndefinedError（不是 TypeError，charts 里的兜底接不住）。 #}
+{% set growth_vals = repos | map(attribute='stars_growth') | select('number') | list %}
+{% set max_growth = (growth_vals | max) if growth_vals else 0 %}
+
+{# 分布用「名称 + 占比条 + 计数」三件套：光看 "TypeScript × 3" 不知道 3 是多还是少，
+   要跟同组最大值比才有意义 —— 这正是条的作用。 #}
+{% macro dist_rows(items, maxn) -%}
+<div class="dist-list">
+  {% for name, n in items %}
+  <div class="dist">
+    <span class="dist-name">{{ name }}</span>
+    {{ n | hbar(maxn, 'accent') }}
+    <span class="num dist-n">{{ n }}</span>
+  </div>
+  {% endfor %}
+</div>
+{%- endmacro %}
+
+{# ============================================================ Hero — 一句话总结 #}
+<section class="panel">
+  <div class="hero-row" style="grid-template-columns: 1fr 1fr 1fr">
+    <div class="stat-cell">
+      <div class="label">今日仓库</div>
+      <span class="num">{{ data.get('count', repos | length) }}</span>
+      <span class="pct flat" style="margin-top:8px">进入十强</span>
+    </div>
+    {% if stats.avg_growth %}
+    <div class="stat-cell up">
+      <div class="label">平均涨幅</div>
+      <span class="num" data-countup="{{ stats.avg_growth }}">+{{ stats.avg_growth }}</span>
+      <span class="pct up">★ / 仓库</span>
+    </div>
+    {% endif %}
+    {% if stats.top_growth %}
+    <div class="stat-cell up">
+      <div class="label">涨得最猛</div>
+      <span class="num" data-countup="{{ stats.top_growth }}">+{{ stats.top_growth }}</span>
+      <span class="pct up">★ 今天</span>
+    </div>
+    {% endif %}
+  </div>
+</section>
+
+{# ============================================================ 今日十强（卡片） #}
+<section class="panel">
+  <div class="panel-head">
+    <h2>今日十强</h2>
+    {% if stats.with_ai %}<span class="badge ok">{{ stats.with_ai }} 已读懂</span>{% endif %}
+    {% if stats.with_tree %}<span class="badge muted">含结构</span>{% endif %}
+  </div>
+  <ul class="rank">
+    {% for it in repos %}
+    <li>
+      <span class="rank-no">{{ it.rank }}</span>
+      <div class="rank-body">
+        <div class="rank-title">
+          <a href="{{ it.url }}" target="_blank" rel="noopener">{{ it.full_name }}</a>
+          {% if it.archived %}<span class="badge warn">已归档</span>{% endif %}
+        </div>
+
+        {# AI 摘要——红色竖线 + 引注色，左下角徽标。永远比 rank-desc 更显眼。 #}
+        {% if it.ai_tagline or it.ai_detail %}
+        <div class="ai-box">
+          <p class="ai-head">
+            <span class="badge ok" style="font-size:10.5px">AI</span>
+            {% if it.ai_tagline %}<strong>{{ it.ai_tagline }}</strong>{% endif %}
+          </p>
+          {% if it.ai_detail %}<p class="ai-detail">{{ it.ai_detail }}</p>{% endif %}
+          {% if it.ai_usage %}<p class="ai-usage">📌 {{ it.ai_usage }}</p>{% endif %}
+        </div>
+        {% endif %}
+
+        {% if it.what %}
+        <p class="rank-desc"{% if it.what_en and it.what != it.what_en %} title="{{ it.what_en }}"{% endif %}>{{ it.what }}</p>
+        {% endif %}
+
+        {# Meta 行：总星 · 今日涨幅 · 语言 · 主题 都在一起排好 #}
+        <div class="rank-meta">
+          <span class="up"><strong>+{{ it.stars_growth_text or 0 }}</strong>★ 今日</span>
+          <span>总 {{ it.stars_total_text }}★</span>
+          {% if it.language %}<span class="tag">{{ it.language }}</span>{% endif %}
+          {% if it.category %}<span class="tag">{{ it.category }}</span>{% endif %}
+          {% if it.growth_ratio %}<span class="tag">{{ it.growth_ratio }}%</span>{% endif %}
+        </div>
+        {% if it.topics %}
+        <div class="rank-meta">
+          {% for t in it.topics[:4] %}<span class="tag">#{{ t }}</span>{% endfor %}
+        </div>
+        {% endif %}
+
+        {# 仓库根目录结构 —— 等宽字体，断词、长仓库名不会把布局撑破 #}
+        {% if it.tree %}
+        <p class="ai-tree">📁 {{ it.tree }}</p>
+        {% endif %}
+
+        {# 热度与更新脱节警告：超过 60 天没 push，但今天还在涨星 #}
+        {% if it.pushed_days is not none and it.pushed_days > 60 %}
+        <div class="rank-meta"><span class="badge warn">已 {{ it.pushed_days }} 天无提交</span></div>
+        {% endif %}
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+
+{# ============================================================ 群体观察 #}
+<section class="panel">
+  <h2>群体观察</h2>
+  <div style="display:flex;flex-direction:column;gap:14px">
+    {% if stats.languages %}
+    {% set lv = stats.languages | map('last') | select('number') | list %}
+    <div>
+      <div class="panel-sub" style="margin:0 0 8px">语言分布</div>
+      {{ dist_rows(stats.languages[:5], (lv | max) if lv else 0) }}
+    </div>
+    {% endif %}
+    {% if stats.categories %}
+    {% set cv = stats.categories | map('last') | select('number') | list %}
+    <div>
+      <div class="panel-sub" style="margin:0 0 8px">类别分布</div>
+      {{ dist_rows(stats.categories[:5], (cv | max) if cv else 0) }}
+    </div>
+    {% endif %}
+    {% if stats.newcomers %}
+    <div>
+      <div class="panel-sub" style="margin:0 0 8px">新面孔</div>
+      <div class="rank-meta">
+        {% for n in stats.newcomers %}<span class="tag">{{ n }}</span> {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+    {% if stats.stale %}
+    <div>
+      <div class="panel-sub" style="margin:0 0 8px">热度与更新脱节</div>
+      <div class="rank-meta">
+        {% for n in stats.stale %}<span class="tag">{{ n }}</span> {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+  </div>
+</section>
+
+{% if report_html %}
+<section class="panel">
+  <h2>完整报告</h2>
+  <div class="prose">{{ report_html | safe }}</div>
+</section>
+{% endif %}
+
+<section class="panel">
+  <h2>数据源</h2>
+  <div class="rank-meta">
+    <span>{{ source.url or '—' }}</span>
+    <span class="dot">·</span>
+    <span>IP {{ source.ip or '—' }}</span>
+    <span class="dot">·</span>
+    <span>{{ source.elapsed or '—' }}s</span>
+    <span class="dot">·</span>
+    <span>补全 {{ source.enriched or 0 }}/{{ source.picked or 0 }}</span>
+  </div>
+  {% if source.get('from_prev') %}
+  <p class="hint" style="margin-top:10px">⚠️ 有 {{ source.from_prev }} 个仓库的详情沿用了今天上一轮的数据
+    （GitHub API 额度用尽，未认证限流 60 次/小时）。下一轮会自动恢复。</p>
+  {% endif %}
+</section>
+
+{% endif %}

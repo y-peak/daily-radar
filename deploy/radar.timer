@@ -1,0 +1,17 @@
+[Unit]
+Description=每天 08:00 与 16:30 采集情报
+Documentation=file:///root/daily-radar/README.md
+
+[Timer]
+# 08:00 —— 早报：看隔夜 GitHub 榜 + 昨日收盘
+# 16:30 —— 晚报：A 股收盘后半小时，资金流数据已落定
+OnCalendar=*-*-* 08:00:00
+OnCalendar=*-*-* 16:30:00
+# 机器重启/关机错过的任务，开机后补跑
+Persistent=true
+# 别整点一起挤，随机推迟 0~5 分钟
+RandomizedDelaySec=300
+Unit=radar-collect.service
+
+[Install]
+WantedBy=timers.target

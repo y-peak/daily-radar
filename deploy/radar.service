@@ -1,0 +1,33 @@
+[Unit]
+Description=个人情报台 Web 服务（daily-radar）
+Documentation=file:///root/daily-radar/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/daily-radar
+ExecStart=/root/daily-radar/.venv/bin/python -m radar serve
+
+# 部署细节（端口 / 访问口令）放在 .env 里，不进代码库：
+#   RADAR_PORT=80
+#   RADAR_TOKEN=一串随机字符
+# 前缀 "-" 表示文件不存在也不报错（本地开发时没有 .env 照样能起）
+EnvironmentFile=-/root/daily-radar/.env
+
+Restart=on-failure
+RestartSec=5s
+
+# 采集在后台线程里跑，给足优雅退出的时间，别把写了一半的 JSON 留下
+TimeoutStopSec=30
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=radar
+
+# 只允许写自己的目录，降低被当成跳板的面
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

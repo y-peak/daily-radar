@@ -1,0 +1,54 @@
+package com.ypeak.radar;
+
+/**
+ * 由 build.sh 在**构建时生成**的一个小小的常量类。
+ *
+ * 为什么不把这几个常量直接写进 MainActivity：
+ * 因为 `START_URL` 里带着站点的访问口令，而本仓库是要推到公开 GitHub 的。
+ * 所以源码里只放 `AppConfig.java.in` 这个模板，构建时用真实口令替换掉
+ * `__RADAR_TOKEN__` 写进临时的构建目录 —— **口令永远不落进 git**。
+ *
+ * （和整条流水线里 `.env` / `RADAR_LLM_KEY` 的处理是同一个原则：
+ *  配置要提交，密钥不提交。）
+ *
+ * 版本号同理：`__RADAR_VERSION_CODE__` / `__RADAR_VERSION_NAME__` 由
+ * build.sh 的 `--code` / `--name` 注入。**版本号必须是编译期常量**，
+ * 因为它要和服务器返回的版本比大小 —— 写死在两处必然会忘记同步。
+ */
+final class AppConfig {
+
+    private AppConfig() {
+    }
+
+    static final String HOST = "118.196.100.121";
+
+    /** 站点的访问口令（构建期注入）。 */
+    static final String TOKEN = "__RADAR_TOKEN__";
+
+    /**
+     * 首次加载用的地址。带上 `?t=<口令>` 让站点种下 Cookie，
+     * 之后 WebView 内部跳转全靠那条 Cookie（一年有效）。
+     */
+    static final String START_URL = "https://" + HOST + "/?t=" + TOKEN;
+
+    /**
+     * 版本查询接口。用于"检测到新版本"。
+     *
+     * 为什么也带 `?t=`：`HttpURLConnection` 走的是自己的 Cookie 存储，
+     * **不会**共享 WebView 的 CookieJar —— 不带口令就会拿到 401。
+     */
+    static final String API_APP = "https://" + HOST + "/api/app?t=" + TOKEN;
+
+    /** 下载地址（短链）。交给系统浏览器去下 + 装，比自己下更可靠。 */
+    static final String APK_URL = "https://" + HOST + "/app?t=" + TOKEN;
+
+    /** 本体的版本。和服务器返回的 versionCode 比大小。 */
+    static final int VERSION_CODE = __RADAR_VERSION_CODE__;
+    static final String VERSION_NAME = "__RADAR_VERSION_NAME__";
+
+    /**
+     * 这个主机上的链接留在壳内，其余（GitHub 仓库、许可证页…）
+     * 一律交给系统浏览器打开。
+     */
+    static final String HOME_HOST = HOST;
+}

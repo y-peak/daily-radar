@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+{# 状态栏底色跟随深浅色（顶栏那块），用 --bg 跟主背景贴合。iOS 没这个概念，
+   没关系，浏览器忽略未知 meta。 #}
+<meta name="theme-color" content="#f7f8fa" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0a0c0f" media="(prefers-color-scheme: dark)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="{{ app.short_name }}">
+<title>{% if title %}{{ title }} · {% endif %}{{ app.name }}</title>
+<meta name="radar-fingerprint" content="{{ fingerprint }}">
+<link rel="manifest" href="/manifest.json">
+<link rel="icon" href="/static/icons/favicon-32.png" sizes="32x32">
+<link rel="icon" href="/static/icons/favicon.ico">
+<link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
+<link rel="stylesheet" href="/static/style.css?v={{ asset_ver }}">
+</head>
+<body data-fingerprint="{{ fingerprint }}">
+
+{# 下拉刷新指示器：固定位置，平时藏在顶栏后面；pull-show 时滑下来。
+   放在 body 开头 → 永远在最上层。 #}
+<div id="pull-indicator" class="pull-indicator" aria-hidden="true">
+  <span class="pull-spin">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 11-9-9c2.5 0 4.8 1 6.5 2.7L21 8"/><path d="M21 3v5h-5"/></svg>
+  </span>
+  <span class="pull-text">下拉刷新</span>
+</div>
+
+<header class="topbar">
+  <a class="brand" href="/">
+    <span class="brand-dot"></span>
+    <span>{{ app.name }}</span>
+  </a>
+  <div class="topbar-right">
+    <span id="freshness" class="freshness" title="数据新鲜度">—</span>
+    <button id="install-btn" class="icon-btn" title="安装到主屏幕" hidden>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-4-4m4 4l4-4M5 21h14"/></svg>
+    </button>
+    <button id="share-btn" class="icon-btn" title="分享" hidden>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.6 13.5l6.8 4M15.4 6.5l-6.8 4"/></svg>
+    </button>
+    <button id="refresh-btn" class="icon-btn" title="立即拉取最新数据">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 11-9-9c2.5 0 4.8 1 6.5 2.7L21 8"/><path d="M21 3v5h-5"/></svg>
+    </button>
+  </div>
+</header>
+
+{# 首页专属"问候条"——基于时间，3 秒内让人感觉到"活的"而不是死报表。
+   active 不为空时（即模块页）整个段不渲染。 #}
+{% if not active %}
+<section class="greeting">
+  <h1 id="greeting-text">晚上好</h1>
+  <p class="sub">
+    <span id="greeting-date">9 月 18 日</span>
+    ·
+    <strong id="freshness-2">—</strong>
+  </p>
+</section>
+{% endif %}
+
+{# 顶部 tabs —— 桌面端显示，移动端让位给底栏（CSS 媒体查询控制）。 #}
+<nav class="tabs">
+  <a class="tab {% if not active %}active{% endif %}" href="/">总览</a>
+  {% for item in nav %}
+  <a class="tab {% if active == item.name %}active{% endif %}"
+     href="/{{ item.name }}/">{{ item.title }}</a>
+  {% endfor %}
+</nav>
+
+<main class="wrap swipe-deck">
+
+{# 安装 App 横幅：只在首页（active 为空时）渲染。
+   是否显示由 JS 根据屏幕宽度 + 是否在 App 内（?t=） + 是否曾被关闭 决定。 #}
+{% if not active %}
+<aside id="install-banner" class="install-banner" hidden>
+  <span class="ib-msg">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="2" width="14" height="20" rx="2"/><path d="M12 18h.01"/></svg>
+    装到手机，看数据更顺手
+  </span>
+  <a class="ib-cta" href="/app">下载 App</a>
+  <button class="ib-x" type="button" aria-label="不再提示">×</button>
+</aside>
+{% endif %}
+
+{% if dates and date %}
+<div class="datebar">
+  <div class="datebar-head">
+    <span class="date-main">{{ date }}</span>
+    {% if is_latest %}<span class="badge ok">最新</span>{% endif %}
+  </div>
+  {% if dates | length > 1 %}
+  <div class="chips">
+    {% for d in dates %}
+    <a class="chip {% if d == date %}active{% endif %}"
+       href="/{{ active }}/{{ d }}.html">{{ d[5:] }}</a>
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>
+{% endif %}
+
+{{ body | safe }}
+</main>
+
+<footer class="foot">
+  <span>{{ app.name }} v{{ app.version }}</span>
+  <span class="dot">·</span>
+  <span id="built-at">{{ built_at }}</span>
+  <span class="dot">·</span>
+  {# 只在安卓壳里出现：显示"我装的是哪一版" + 一个主动检查更新的入口。
+     壳内部的自动检查是"每 6 小时静默一次"，用户看不到版本、也没法主动问 —— 
+     这块补的就是那部分。浏览器里 window.RadarNative 不存在，保持 hidden。 #}
+  <button type="button" id="app-ver" class="app-ver" hidden>
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="2" width="14" height="20" rx="2"/><path d="M12 18h.01"/></svg>
+    <span>App v<span id="app-ver-name">—</span></span>
+    <span class="sep">·</span>
+    <span id="app-ver-act">检查更新</span>
+  </button>
+  <a href="/app">安装安卓 App</a>
+</footer>
+
+{# 底栏导航 —— 移动端 Material 3 风格。
+   icon + label 双层（active 时 label 才浮出）；桌面端走 CSS 隐藏。
+   nav 数据从总览而来，每个模块项都有图标（按模块名分配内置 SVG）。 #}
+<nav class="bottom-nav" aria-label="主导航">
+  <a class="bn-item {% if not active %}active{% endif %}" href="/">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9.5L12 3l9 6.5V21h-6v-7H9v7H3z"/></svg>
+    <span class="label">总览</span>
+  </a>
+  {% for item in nav %}
+  <a class="bn-item {% if active == item.name %}active{% endif %}"
+     href="/{{ item.name }}/">
+    {% if item.name == 'market_flow' %}
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M7 15l3-3 4 4 5-6"/></svg>
+    {% elif item.name == 'github_trending' %}
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 00-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0020 4.77 5.07 5.07 0 0019.91 1S18.73.65 16 2.48a13.38 13.38 0 00-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 005 4.77a5.44 5.44 0 00-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 009 18.13V22"/></svg>
+    {% elif item.name == 'reader' %}
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M4 4.5A2.5 2.5 0 016.5 2H20v20H6.5A2.5 2.5 0 014 19.5z"/><path d="M9 7h7M9 11h5"/></svg>
+    {% else %}
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+    {% endif %}
+    <span class="label">{{ item.title[:4] }}</span>
+  </a>
+  {% endfor %}
+</nav>
+
+{# FAB（悬浮按钮）：分享+刷新之外，多一个"立即刷新"快捷入口。
+   桌面端显示在右下；移动端让位给底栏，避免抢占拇指区。
+   ⚠️ 读书页不显示：书是离线资产，"刷新"在那里没有意义，
+   一个按不出变化的按钮比没有按钮更让人困惑。 #}
+{% if active and active != 'reader' %}
+<button id="fab" class="fab" title="立即刷新" aria-label="立即刷新">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 11-9-9c2.5 0 4.8 1 6.5 2.7L21 8"/><path d="M21 3v5h-5"/></svg>
+</button>
+{% endif %}
+
+<div id="toast" class="toast" hidden></div>
+
+<script src="/static/app.js?v={{ asset_ver }}"></script>
+</body>
+</html>

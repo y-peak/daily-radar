@@ -1,0 +1,54 @@
+# 运行时产物
+data/
+public/
+logs/
+
+# 模块一可选克隆的仓库（体量大，且是别人的代码）
+repos/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# 环境与编辑器
+.env
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 本地自测输出与一次性的数据源探测脚本
+_*.txt
+_probe.txt
+probe_market*.py
+
+# 临时审计/比对目录（放下载下来的旧 APK 之类）
+_audit/
+
+# 展示层的单文件预览快照（CSS 内联、导航改本地链接）——本地看排版用，不是产物
+_preview/
+
+# Android App：构建中间产物与签名材料一律不入库
+# （APK 里**内嵌了访问口令**，提交等于把口令公开；密钥/口令更不用说）
+# 注意：res/ 下的图标**要入库** —— build.sh 不生成它们，
+# 忽略掉的话新克隆的仓库就构建不出来了。
+app/android/build/
+app/android/dist/
+*.jks
+*.keystore
+# 任何位置的安装包都不该入库（下载下来做校验的临时包也算）
+*.apk
+# build.sh 在没给 --token 时会去读它；里面是明文口令，绝不能入库
+app/android/.token
+# 上次构建的版本号（供自动递增用）；dist/ 会被清空，所以只能放这儿
+app/android/.last_version
+
+# 服务器上给手机下载的安装包目录
+apk/
+
+# ⚠️ 这张二维码里**编码了访问口令**（扫码即下载 + 附带鉴权）→ 等于一把钥匙，别入库
+radar-download-qr.png
+*-download-qr.png
