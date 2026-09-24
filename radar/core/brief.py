@@ -261,6 +261,20 @@ def _rule_focus(slot: str, mk: dict, wl: dict) -> list[str]:
         if movers:
             out.append("波动较大：" + "、".join(
                 f"{i['name']}{i['pct_text']}" for i in movers[:4]))
+
+    if not out:
+        # ⭐ 上面三条规则分别依赖【涨跌家数】【板块资金】【自选股】，
+        #    而这三样**可能同时缺席** —— 2026-09-24 就是这样：东财板块资金接口
+        #    挂了（`errors` 里记着 RemoteDisconnected）、`breadth` 是空的、
+        #    自选股名单还没加。三条全不命中 → 看点为空 → 简报只剩一行数字，
+        #    用户会以为简报坏了（冒烟里那条"三个时段都有看点"的断言当场变红）。
+        #    **指数永远有**，拿它兜一句，让"看点"这一栏不空着。
+        #    文案要说清"为什么只有指数"，别让人以为这就是今天的全部看点。
+        price = mk.get("index_price")
+        if price and price != "—":
+            out.append(f"{tag}{mk.get('index_name') or '指数'} {price}"
+                       f"（{mk.get('index_pct') or '—'}）"
+                       " —— 今天没拿到板块资金和自选股数据，先只看指数")
     return out[:4]
 
 

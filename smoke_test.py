@@ -3848,6 +3848,28 @@ try:
 
     check("README 记录了论题卡",
           lambda: has("论题", (ROOT / "README.md").read_text(encoding="utf-8")))
+
+    # ---------------------------------------------------- C. 规则兜底（看点不许空）
+    # 2026-09-24 在服务器上真红过的一条：东财板块资金接口挂了 + breadth 是空的 +
+    # 自选股名单为空 → 三条规则一条都没命中 → focus 为 []，简报只剩一行数字。
+    # 断言没写错，是**兜底不够深**。
+    def _focus_never_empty():
+        mk = {"index_name": "上证指数", "index_price": "3,888.37", "index_pct": "-1.22%"}
+        out = _b21._rule_focus("close", mk, {})
+        if not out:
+            raise AssertionError("板块资金与自选股同时缺席时，看点还是空的")
+        return True
+    check("⭐ 板块资金与自选股全缺时，看点仍不为空（指数兜底）", _focus_never_empty)
+
+    def _focus_normal_path():
+        """⭐ 反面：有数据时不许走兜底 —— 否则等于把上面三条规则全删了还看不出来。"""
+        mk = {"index_name": "上证指数", "index_price": "3,888.37", "index_pct": "-1.22%",
+              "up": 800, "total": 5000, "up_ratio": 16}
+        out = _b21._rule_focus("close", mk, {})
+        if not out or "先只看指数" in out[0]:
+            raise AssertionError(f"有涨跌家数却走了兜底：{out}")
+        return True
+    check("有数据时走正常规则，不走兜底（防兜底吃掉全部规则）", _focus_normal_path)
 except Exception as exc:  # noqa: BLE001
     import traceback
     print("  [!!] 提示词护栏 / 论题卡检查抛异常：")
