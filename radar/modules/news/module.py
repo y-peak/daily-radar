@@ -39,6 +39,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from radar.core import prompts
 from radar.core.llm import LLM
 from radar.core.module import Context, Module, load_sibling
 
@@ -57,14 +58,13 @@ NAME_MATCH_MIN = 3
 # 否则 12 位长串（订单号、身份证之类）会被切出一个假的 6 位码。
 _RE_SIX = re.compile(r"(?<!\d)(\d{6})(?!\d)")
 
-DIGEST_SYSTEM = (
-    "你是财经简讯编辑。只根据用户给的标题与分组写导读，"
-    "不引入任何外部信息，不预测涨跌，不给投资建议。"
+DIGEST_SYSTEM = prompts.system_for_untrusted(
+    "你是财经简讯编辑，给个人投资者写一句话导读。"
+    "不预测涨跌，不给投资建议，不推荐买卖。"
     "语言平实，避免『重磅』『利好』这类夸张词。"
 )
 DIGEST_USER = """\
 下面是今天抓到的财经快讯（已按主题分组，每行"时间 | 分组 | 标题"）：
-
 {lines}
 
 请写一段 3-5 句的中文导读：
@@ -504,7 +504,10 @@ class News(Module):
         if not lines:
             return "", ""
 
-        data = llm.chat_json(DIGEST_SYSTEM, DIGEST_USER.format(lines="\n".join(lines)),
+        # ⭐ 标题是第三方原文（不可信），必须包进显式边界再喂给模型 ——
+        #    否则一条写着"忽略以上要求"的标题就能改写整段导读。
+        payload = prompts.wrap_untrusted("\n".join(lines), "今日财经快讯标题")
+        data = llm.chat_json(DIGEST_SYSTEM, DIGEST_USER.format(lines=payload),
                              max_tokens=int(scfg.get("max_tokens", 900)),
                              required=("digest",))
         llm.save_cache()

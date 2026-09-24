@@ -22,6 +22,7 @@ from radar.core.module import Context, Module, load_sibling
 
 sources = load_sibling(__file__, "sources")
 userlist = load_sibling(__file__, "userlist")
+thesis = load_sibling(__file__, "thesis")
 
 # 判定阈值，集中放这里便于调参
 BIG_MOVE = 3.0          # 单只涨跌超过它算"大波动"
@@ -156,6 +157,9 @@ class Watchlist(Module):
     def collect(self, ctx: Context) -> Any:
         wl = userlist.load(ctx.data_dir)
         requested = [it["secid"] for it in wl["items"]]
+        # 论题卡（`data/thesis.json`）：用户数据，但**当天那份要进快照** ——
+        # 页面渲染的是"当时我怎么想的"，半年后重建这页才不会变。
+        cards = thesis.load(ctx.data_dir)["items"]
 
         out: dict[str, Any] = {
             "fetched_at": datetime.now().isoformat(timespec="seconds"),
@@ -164,10 +168,15 @@ class Watchlist(Module):
             # 名单原样带一份：页面上的"管理"表单要靠它回填，
             # 而且快照里留下名单 = 半年后打开今天这页，能看清"当时盯的是哪几只"
             "list": wl["items"],
+            "theses": cards,
             "notes": {it["secid"]: it["note"] for it in wl["items"] if it["note"]},
             "quotes": [],
             "errors": {},
         }
+        if cards:
+            bad = sum(1 for c in cards.values() if thesis.validate(c))
+            ctx.log_info(f"      · 论题卡 {len(cards)} 张"
+                         + (f"（其中 {bad} 张不完整）" if bad else ""))
 
         if not requested:
             # 空名单是合法状态：页面要能出来（上面有"添加"入口），所以不抛错
@@ -189,8 +198,18 @@ class Watchlist(Module):
     # ------------------------------------------------------------------ analyze
     def analyze(self, raw: Any, ctx: Context) -> Any:
         notes = raw.get("notes") or {}
-        items = [_item(row, notes.get(sources.secid_of(row), ""))
-                 for row in (raw.get("quotes") or [])]
+        cards = raw.get("theses") or {}
+        items: list[dict] = []
+        for row in (raw.get("quotes") or []):
+            secid = sources.secid_of(row)
+            one = _item(row, notes.get(secid, ""))
+            one["secid"] = secid
+            card = cards.get(secid)
+            if card:
+                # 论题卡只挂在**有行情**的标的上：拿不到价格时，"支柱达标没有"
+                # 也没法对照，画一张空记分板只会让人以为论题没问题
+                one["thesis"] = thesis.scorecard(card)
+            items.append(one)
         # 按涨跌幅排序：涨得最猛的在最上面。把 None（停牌）压到最后。
         items.sort(key=lambda x: (x["pct"] is None, -(x["pct"] or 0)))
 
@@ -234,7 +253,33 @@ class Watchlist(Module):
                                if abs(i["pct"] or 0) >= BIG_MOVE],
                 "heavy": [i["name"] for i in items if i["big_amount"]],
             },
+            "thesis_stats": self._thesis_stats(items),
             "signals": self._signals(items, avg),
+        }
+
+    # ------------------------------------------------------------------ 论题
+    @staticmethod
+    def _thesis_stats(items: list[dict]) -> dict:
+        """论题卡的汇总。**只统计有行情的标的**（没行情的不画记分板）。"""
+        cards = [(i.get("name") or i.get("code") or "", i.get("thesis") or {})
+                 for i in items if i.get("thesis")]
+        if not cards:
+            return {"count": 0, "weak": [], "due": [], "review_due": [],
+                    "incomplete": []}
+        due: list[dict] = []
+        for name, card in cards:
+            for e in (card.get("due") or []):
+                due.append({"name": name, "date": e.get("date", ""),
+                            "text": e.get("text", ""),
+                            "overdue": bool(e.get("overdue"))})
+        return {
+            "count": len(cards),
+            "weak": [{"name": n, "n": (c.get("counts") or {}).get("behind", 0)}
+                     for n, c in cards if (c.get("counts") or {}).get("behind")],
+            "due": due,
+            "review_due": [n for n, c in cards
+                           if (c.get("review") or {}).get("due")],
+            "incomplete": [n for n, c in cards if not c.get("ok")],
         }
 
     # ------------------------------------------------------------------ 结论
@@ -299,6 +344,30 @@ class Watchlist(Module):
         if heavy:
             names = "、".join(f"{i['name']}({i['amount_text']})" for i in heavy[:5])
             out.append({"level": "flat", "text": f"明显放量的：{names}"})
+
+        # ---- 论题卡：这里出的每一条都是"涨跌幅看不出来"的那种信息 ----
+        st = Watchlist._thesis_stats(items)
+        if st["weak"]:
+            names = "、".join(f"{w['name']}（{w['n']} 条）" for w in st["weak"][:5])
+            out.append({"level": "warn", "text":
+                        f"论题有支柱走弱，值得重估：{names} —— "
+                        "涨跌幅正常不代表买入理由还成立"})
+        if st["due"]:
+            parts = []
+            for d in st["due"][:5]:
+                when = "已过" if d["overdue"] else d["date"]
+                parts.append(f"{when} {d['text']}（{d['name']}）".strip())
+            out.append({"level": "warn" if any(d["overdue"] for d in st["due"])
+                        else "flat",
+                        "text": "催化临近：" + "、".join(parts)})
+        if st["review_due"]:
+            out.append({"level": "flat", "text":
+                        f"{len(st['review_due'])} 张论题卡超过 {thesis.REVIEW_DAYS} 天没更新"
+                        f"：{'、'.join(st['review_due'][:5])}"})
+        if st["incomplete"]:
+            out.append({"level": "warn", "text":
+                        f"{len(st['incomplete'])} 张论题卡不完整（缺认错条件或退出条件）"
+                        f"：{'、'.join(st['incomplete'][:5])}"})
         return out
 
     # ------------------------------------------------------------------ report
@@ -322,6 +391,38 @@ class Watchlist(Module):
             for sig in signals:
                 L.append(f"- {sig['text']}")
             L.append("")
+
+        # ---- 论题：逐只列出"当初买它的理由还成不成立" ----
+        cards = [i for i in (data.get("items") or []) if i.get("thesis")]
+        if cards:
+            L.append("### 论题（买入理由还成不成立）")
+            L.append("")
+            for it in cards:
+                t = it["thesis"]
+                L.append(f"**{it['name']}（{it['code']}）** {it['pct_text']}")
+                L.append("")
+                if t.get("statement"):
+                    L.append(f"- 论题：{t['statement']}")
+                if t.get("counts_text"):
+                    L.append(f"- 支柱：{t['counts_text']}")
+                for p in (t.get("pillars") or []):
+                    note = f" —— {p['note']}" if p.get("note") else ""
+                    L.append(f"  - [{p.get('label', '')}] {p.get('text', '')}{note}")
+                if t.get("verdict"):
+                    L.append(f"- 判词：{t['verdict'].get('text', '')}")
+                for r in (t.get("risks") or [])[:3]:
+                    L.append(f"- 认错条件：{r}")
+                if t.get("exit"):
+                    L.append(f"- 退出：{t['exit']}")
+                for d in (t.get("due") or []):
+                    when = "已过" if d.get("overdue") else d.get("date", "")
+                    L.append(f"- ⏰ 催化：{when} {d.get('text', '')}")
+                rev = t.get("review") or {}
+                L.append(f"- 复盘：{rev.get('text', '')}"
+                         + ("（该更新了）" if rev.get("due") else ""))
+                for pb in (t.get("problems") or []):
+                    L.append(f"- ⚠️ 论题卡问题：{pb}")
+                L.append("")
 
         L.append("### 明细")
         L.append("")

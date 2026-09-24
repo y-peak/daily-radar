@@ -73,6 +73,111 @@
 </section>
 {% endif %}
 
+{# ============================================================ 论题卡
+   「当初买它的理由还成不成立」—— 这一节存在的意义正是涨跌幅**看不出来**的东西。
+   没有论题卡时整节不渲染（不是空着占地方）。 #}
+{% set tstats = data.get('thesis_stats', {}) %}
+{% if tstats.get('count') %}
+<section class="panel" id="wl-thesis">
+  <div class="panel-head">
+    <h2>论题</h2>
+    <span class="badge muted">{{ tstats.get('count') }} 张卡</span>
+  </div>
+  <p class="hint">
+    记的是「当初为什么买」和「什么情况下我认错」。论题失效通常早于股价反映 ——
+    这里比涨跌幅更早看出问题。数据来自 <code>data/thesis.json</code>（不入仓库）。
+  </p>
+
+  {% for it in items %}
+  {% if it.get('thesis') %}
+  {% set t = it.get('thesis') %}
+  <div class="wl-thesis-card">
+    <div class="wl-thesis-head">
+      <span class="wl-name">{{ it.get('name', '') }}</span>
+      <span class="hint">{{ it.get('market', '') }}{{ it.get('code', '') }}</span>
+      <span class="num {{ it.get('tone', 'flat') }}">{{ it.get('pct_text', '—') }}</span>
+      {% if t.get('verdict') %}
+      <span class="wl-verdict {{ t.get('verdict', {}).get('tone', 'flat') }}">{{ t.get('verdict', {}).get('text', '') }}</span>
+      {% endif %}
+    </div>
+
+    {% if t.get('statement') %}
+    <p class="wl-thesis-statement">{{ t.get('statement') }}</p>
+    {% endif %}
+
+    {% if t.get('pillars') %}
+    <ul class="wl-pillars">
+      {% for p in t.get('pillars', []) %}
+      <li class="wl-pillar {{ p.get('tone', 'flat') }}">
+        <span class="wl-pillar-tag">{{ p.get('label', '') }}</span>
+        <span class="wl-pillar-text">{{ p.get('text', '') }}</span>
+        {% if p.get('note') %}<span class="wl-pillar-note">{{ p.get('note') }}</span>{% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+
+    <dl class="wl-thesis-meta">
+      {% if t.get('risks') %}
+      <dt>什么情况下认错</dt>
+      <dd>{{ t.get('risks', []) | join('；') }}</dd>
+      {% endif %}
+      {% if t.get('exit') %}
+      <dt>退出条件</dt>
+      <dd>{{ t.get('exit') }}</dd>
+      {% endif %}
+      {% if t.get('due') %}
+      <dt>催化临近</dt>
+      <dd>
+        {% for d in t.get('due', []) %}
+        <span class="tag {{ 'bad' if d.get('overdue') else '' }}">
+          {{ '已过' if d.get('overdue') else d.get('date', '') }} {{ d.get('text', '') }}</span>
+        {% endfor %}
+      </dd>
+      {% endif %}
+      <dt>复盘</dt>
+      <dd>{{ t.get('review', {}).get('text', '') }}
+        {% if t.get('review', {}).get('due') %}<span class="wl-verdict bad">该更新了</span>{% endif %}
+      </dd>
+    </dl>
+
+    {% for pb in t.get('problems', []) %}
+    <p class="wl-thesis-problem">⚠️ 论题卡不完整：{{ pb }}</p>
+    {% endfor %}
+  </div>
+  {% endif %}
+  {% endfor %}
+
+  <details class="wl-manage">
+    <summary>怎么写论题卡</summary>
+    <div class="prose">
+      <p>服务器上编辑 <code>data/thesis.json</code>，key 用 secid（如 <code>1.600519</code>）：</p>
+      <pre class="wl-pre">{
+  "updated_at": "{{ data.get('generated_at', '')[:10] }}",
+  "items": {
+    "1.600519": {
+      "statement": "一句话论题（必须能被证伪）",
+      "pillars": [
+        {"text": "海外订单环比继续增长", "status": "on_track", "note": "Q2 环比 +12%"},
+        {"text": "毛利率站上 35%", "status": "behind", "note": "Q2 33.8%"}
+      ],
+      "risks": ["海外需求不及预期：订单连续两季环比下滑即认错"],
+      "exit": "2026Q3 毛利率 <35% 或大客户订单同比转负",
+      "catalysts": [{"date": "{{ data.get('generated_at', '')[:4] }}-10-31", "text": "三季报"}],
+      "updated_at": "{{ data.get('generated_at', '')[:10] }}"
+    }
+  }
+}</pre>
+      <ul>
+        <li><code>status</code> 只有三个值：<code>on_track</code>（达标）、<code>behind</code>（走弱）、<code>pending</code>（待验证）—— 认不出的一律按待验证算，不猜。</li>
+        <li><strong><code>risks</code> 不能空</strong>：写不出"什么情况下我认错"，它就不是论题，是口号。空着页面会明确标出来。</li>
+        <li>超过 <strong>90 天</strong>没更新会提示该复盘 —— 一张半年没动过的卡，信息量等于没有。</li>
+      </ul>
+    </div>
+  </details>
+</section>
+{% endif %}
+
 {% if items %}
 <section class="panel">
   <div class="panel-head">

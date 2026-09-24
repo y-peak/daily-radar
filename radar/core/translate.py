@@ -44,6 +44,8 @@ import time
 import urllib.parse
 from pathlib import Path
 
+from . import prompts
+
 # ---------------------------------------------------------------- 术语大小写修正
 # 机翻会把专有名词和缩写搞成小写（llm / gpu / api），读起来很别扭。
 # 翻译完成后统一纠回来。只放"一定要大写"的，避免误伤普通词。
@@ -228,7 +230,7 @@ class _MyMemory(_Provider):
         return str(out)
 
 
-_LLM_SYSTEM = (
+_LLM_SYSTEM = prompts.system_for_untrusted(
     "你是技术编辑，负责把软件项目的英文简介翻成简体中文，给中文开发者看。"
     "只输出 JSON，不要任何解释。"
 )
@@ -271,6 +273,9 @@ class _LLM(_Provider):
         for i in range(0, len(texts), self.chunk):
             part = texts[i:i + self.chunk]
             payload = json.dumps({"t": part}, ensure_ascii=False)
+            # ⭐ 待翻译的是**别人写的**简介原文，属第三方内容 → 包进显式边界，
+            #    免得上游故意在简介里写"忽略以上要求"来劫持这次的翻译
+            payload = prompts.wrap_untrusted(payload, "待翻译的英文简介")
             # 预算里要给**思考**留位置：带思考的模型（deepseek-flash / v4-pro）
             # reasoning 与正文共用 max_tokens，给少了会正文全空。
             data = self.llm.chat_json(

@@ -2698,9 +2698,94 @@ body.plans-open { overflow: hidden; }
 .wl-msg.warn  { color: var(--warn); }
 .wl-msg.error { color: var(--up); }
 
+/* ============================================================ 论题卡
+   「买入理由还成不成立」。刻意做成**卡片**而不是表格的一列：
+   表格里塞不进"支柱 / 认错条件 / 退出条件"这种多行内容，
+   挤进去的结果就是谁也不看。 */
+.wl-thesis-card {
+  margin: 0 0 var(--sp-4);
+  padding: var(--sp-4);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+}
+.wl-thesis-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  margin-bottom: var(--sp-2);
+}
+.wl-verdict {
+  font-size: var(--fs-xs);
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  color: var(--text-dim);
+}
+.wl-verdict.good { color: var(--up);    border-color: var(--up); }
+.wl-verdict.bad  { color: var(--down);  border-color: var(--down); }
+.wl-thesis-statement {
+  margin: 0 0 var(--sp-3);
+  font-size: var(--fs-base);
+  line-height: 1.6;
+  color: var(--text);
+}
+.wl-pillars { list-style: none; margin: 0 0 var(--sp-3); padding: 0; }
+.wl-pillar {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  padding: 5px 0 5px var(--sp-3);
+  border-left: 3px solid var(--border-strong);
+  font-size: var(--fs-sm);
+}
+.wl-pillar.good { border-left-color: var(--up); }
+.wl-pillar.bad  { border-left-color: var(--down); }
+.wl-pillar-tag {
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+  min-width: 3.4em;
+}
+.wl-pillar.good .wl-pillar-tag { color: var(--up); }
+.wl-pillar.bad  .wl-pillar-tag { color: var(--down); }
+.wl-pillar-note { color: var(--text-faint); font-size: var(--fs-xs); }
+
+.wl-thesis-meta {
+  margin: 0;
+  padding: 0;
+  font-size: var(--fs-sm);
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 4px var(--sp-3);
+}
+.wl-thesis-meta dt { color: var(--text-faint); }
+.wl-thesis-meta dd { margin: 0; color: var(--text-dim); }
+.wl-thesis-problem {
+  margin: var(--sp-2) 0 0;
+  font-size: var(--fs-sm);
+  color: var(--warn);
+}
+.wl-pre {
+  margin: var(--sp-2) 0;
+  padding: var(--sp-3);
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  line-height: 1.6;
+  color: var(--text-dim);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+}
+
 @media (max-width: 560px) {
   /* 手机上 4 列会挤成"每格两个字"，改成 2×2 */
   .wl-hero { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  /* 论题卡的"标签 / 内容"两列在窄屏会只剩一点点宽度给内容，改上下排 */
+  .wl-thesis-meta { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+  .wl-thesis-meta dt { margin-top: var(--sp-2); }
 }
 
 /* =========================================================================

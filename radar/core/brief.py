@@ -25,6 +25,7 @@ from pathlib import Path
 
 from . import store
 from .config import Config
+from . import prompts
 from .llm import LLM
 from .module import load_sibling
 
@@ -35,9 +36,8 @@ SLOT_EMOJI_HEAD = {"morning": "🌅", "intraday": "⏰", "close": "🔔"}
 
 DISCLAIMER = "以上是据公开数据做的概率性表述，不构成任何投资建议。"
 
-_SYSTEM = (
+_SYSTEM = prompts.system_for_numbers(
     "你是一个给个人投资者写每日复盘的中文助手。"
-    "只根据给定的数字说话，不许编造任何没有给出的数据、新闻或事件。"
     "语气克制、简短，不喊口号，不用夸张词。"
 )
 
